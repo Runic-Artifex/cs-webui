@@ -21,7 +21,7 @@
     <NoWarn>$(NoWarn);CS1591</NoWarn>
 
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <RepositoryUrl Condition="'$(RepositoryUrl)' == ''">https://github.com/ViktorJannicke/cs-webui</RepositoryUrl>
+    <RepositoryUrl Condition="'$(RepositoryUrl)' == ''">https://github.com/Runic-Artifex/cs-webui</RepositoryUrl>
     <RepositoryType Condition="'$(RepositoryType)' == ''">git</RepositoryType>
 
     <VersionPrefix>2.5.0</VersionPrefix>
@@ -32,7 +32,7 @@
     <Copyright>Copyright (c) 2026 Viktor Jannicke</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
-    <PackageProjectUrl>https://github.com/ViktorJannicke/cs-webui</PackageProjectUrl>
+    <PackageProjectUrl>https://github.com/Runic-Artifex/cs-webui</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 </Project>

@@ -7,7 +7,7 @@
     <NoWarn>$(NoWarn);1591;CA1720</NoWarn>
     <PackageId>CsWebUi</PackageId>
     <Description>Safe, ergonomic .NET 10 window and callback abstractions for WebUI.</Description>
-    <PackageTags>webui;dotnet;bindings;aot;desktop</PackageTags>
+    <PackageTags>runic-artifex;webui;dotnet;bindings;aot;desktop</PackageTags>
   </PropertyGroup>
 
   <ItemGroup>
