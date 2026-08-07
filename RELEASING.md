@@ -22,12 +22,14 @@ To adopt a newer nightly deliberately:
 
 1. Read the commit from the official release body and the `sha256:` digests
    returned by GitHub's release-assets API.
-2. Update the WebUI revision in `flake.nix`, then run
-   `nix flake update webui --accept-flake-config`.
-3. Update the matching commit, version, archive names, and digests in
+2. Update the commit, version, archive names, and digests in
    `eng/webui-nightly-assets.json`.
-4. Update `CsWebUi.Native` for any ABI additions until
+3. Update `CsWebUi.Native` for any ABI additions until
    `eng/validate-webui-abi.sh` passes against the downloaded header.
+4. Deliberately update the independently tested source revision in `flake.nix`
+   when the fork or upstream source used for development should advance, then
+   run `nix flake update webui --accept-flake-config`. It does not need to match
+   the official binary revision, but its exported ABI must remain compatible.
 5. Run the verified bootstrap and both verification paths:
 
    ```bash
@@ -40,4 +42,5 @@ To adopt a newer nightly deliberately:
    ```
 
 The NuGet workflow packages only the bootstrapped official archives. Its
-separate source-build matrix must also succeed for the same pinned commit.
+separate source-build matrix and lifecycle regression must also succeed for the
+test-source revision pinned in `flake.lock`.

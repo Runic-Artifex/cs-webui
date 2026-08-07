@@ -19,9 +19,10 @@ concurrency:
 
 jobs:
   prepare:
-    name: Validate pinned WebUI source
+    name: Validate pinned WebUI test source
     runs-on: ubuntu-24.04
     outputs:
+      repository: ${{ steps.webui-revision.outputs.repository }}
       revision: ${{ steps.webui-revision.outputs.revision }}
     steps:
       - uses: actions/checkout@v7
@@ -31,18 +32,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          owner=$(jq -er '.nodes.webui.locked.owner | select(length > 0)' flake.lock)
+          repository_name=$(jq -er '.nodes.webui.locked.repo | select(length > 0)' flake.lock)
           revision=$(jq -er '.nodes.webui.locked.rev | select(test("^[0-9a-f]{40}$"))' flake.lock)
-          asset_revision=$(jq -er '.commit | select(test("^[0-9a-f]{40}$"))' eng/webui-nightly-assets.json)
-          if [[ "$revision" != "$asset_revision" ]]; then
-            echo "flake.lock pins $revision but the official asset manifest pins $asset_revision." >&2
-            exit 1
-          fi
+          echo "repository=$owner/$repository_name" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
       - name: Check out pinned WebUI source
         uses: actions/checkout@v7
         with:
-          repository: webui-dev/webui
+          repository: ${{ steps.webui-revision.outputs.repository }}
           ref: ${{ steps.webui-revision.outputs.revision }}
           path: .upstream/webui
 
@@ -74,7 +73,7 @@ jobs:
       - name: Check out pinned WebUI source
         uses: actions/checkout@v7
         with:
-          repository: webui-dev/webui
+          repository: ${{ needs.prepare.outputs.repository }}
           ref: ${{ needs.prepare.outputs.revision }}
           path: .upstream/webui
 
@@ -82,6 +81,7 @@ jobs:
         run: >-
           cmake -S .upstream/webui -B native-build
           -DBUILD_SHARED_LIBS=ON
+          -DBUILD_TESTING=ON
           -DWEBUI_BUILD_EXAMPLES=OFF
           -DWEBUI_OUT_LIB_NAME=webui-2
           -DWEBUI_USE_TLS=OFF
@@ -89,6 +89,9 @@ jobs:
 
       - name: Build shared library
         run: cmake --build native-build --config Release --parallel
+
+      - name: Run native lifecycle regression
+        run: ctest --test-dir native-build --build-config Release --output-on-failure
 
       - name: Install shared library
         run: cmake --install native-build --prefix native-install --config Release
@@ -98,6 +101,7 @@ jobs:
         run: >-
           cmake -S .upstream/webui -B native-static-build
           -DBUILD_SHARED_LIBS=OFF
+          -DBUILD_TESTING=OFF
           -DWEBUI_BUILD_EXAMPLES=OFF
           -DWEBUI_OUT_LIB_NAME=webui-2
           -DWEBUI_USE_TLS=OFF

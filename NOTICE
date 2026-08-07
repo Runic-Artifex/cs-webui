@@ -18,8 +18,10 @@ The logo license is retained at eng/licenses/WebUI-Logo-LICENSE.txt and in the
 NuGet packages under licenses/WebUI-Logo/.
 
 The exact upstream nightly revision and archive digests are recorded in
-eng/webui-nightly-assets.json. The same revision is independently built from
-source by the Nix and native-build verification workflows.
+eng/webui-nightly-assets.json. Source-build and lifecycle verification use the
+separately pinned WebUI revision in flake.lock. That test revision may come from
+the Runic-Artifex fork while a fix is being validated; no binaries built from
+the fork enter the published package.
 
 The optional statically linked Windows build includes WebView2LoaderStatic.lib
 from the Microsoft.Web.WebView2 SDK, version 1.0.4078.44. Its license and
