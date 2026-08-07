@@ -1,6 +1,6 @@
 <div align="center">
 
-![WebUI and C#](assets/webui_csharp.png)
+![WebUI and C#](https://raw.githubusercontent.com/Runic-Artifex/cs-webui/main/assets/webui_csharp.png)
 
 # CsWebUi v2.5.0-beta.4.4
 
