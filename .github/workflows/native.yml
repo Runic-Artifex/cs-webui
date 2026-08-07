@@ -32,6 +32,11 @@ jobs:
         run: |
           set -euo pipefail
           revision=$(jq -er '.nodes.webui.locked.rev | select(test("^[0-9a-f]{40}$"))' flake.lock)
+          asset_revision=$(jq -er '.commit | select(test("^[0-9a-f]{40}$"))' eng/webui-nightly-assets.json)
+          if [[ "$revision" != "$asset_revision" ]]; then
+            echo "flake.lock pins $revision but the official asset manifest pins $asset_revision." >&2
+            exit 1
+          fi
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
       - name: Check out pinned WebUI source
@@ -46,7 +51,7 @@ jobs:
         run: bash eng/validate-webui-abi.sh .upstream/webui/include/webui.h
 
   build:
-    name: WebUI (${{ matrix.rid }})
+    name: Source build verification (${{ matrix.rid }})
     needs: prepare
     runs-on: ${{ matrix.os }}
     strategy:
@@ -106,26 +111,6 @@ jobs:
           cmake --build native-static-build --config Release --parallel
           cmake --install native-static-build --prefix native-static-install --config Release
 
-      - name: Acquire static WebView2 loader
-        if: matrix.rid == 'win-x64'
-        shell: pwsh
-        run: |
-          $packageUri = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$env:WEBVIEW2_SDK_VERSION/microsoft.web.webview2.$env:WEBVIEW2_SDK_VERSION.nupkg"
-          $packagePath = Join-Path $env:RUNNER_TEMP "microsoft.web.webview2.nupkg"
-          $packageRoot = Join-Path $env:RUNNER_TEMP "microsoft.web.webview2"
-
-          Invoke-WebRequest -Uri $packageUri -OutFile $packagePath
-          [System.IO.Compression.ZipFile]::ExtractToDirectory($packagePath, $packageRoot)
-
-          $loader = Join-Path $packageRoot "build/native/x64/WebView2LoaderStatic.lib"
-          if (-not (Test-Path -LiteralPath $loader)) {
-            throw "The WebView2 SDK package did not contain the x64 static loader."
-          }
-
-          New-Item -ItemType Directory -Path native-install/static -Force | Out-Null
-          Copy-Item -LiteralPath native-static-install/lib/webui-2.lib -Destination native-install/static/webui-2.lib
-          Copy-Item -LiteralPath $loader -Destination native-install/static/WebView2LoaderStatic.lib
-
       - name: Verify Windows DLL has no dynamic MSVC runtime dependency
         if: matrix.rid == 'win-x64'
         shell: pwsh
@@ -151,16 +136,49 @@ jobs:
             throw "webui-2.dll dynamically depends on the MSVC/UCRT runtime."
           }
 
-      - name: Upload native asset
+  official-assets:
+    name: Bootstrap official nightly assets
+    needs: prepare
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download and verify official WebUI binaries
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./eng/bootstrap-webui.sh artifacts
+
+      - name: Acquire static WebView2 loader
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_uri="https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/${WEBVIEW2_SDK_VERSION}/microsoft.web.webview2.${WEBVIEW2_SDK_VERSION}.nupkg"
+          package_path="$RUNNER_TEMP/microsoft.web.webview2.nupkg"
+          package_root="$RUNNER_TEMP/microsoft.web.webview2"
+          curl -fsSL "$package_uri" -o "$package_path"
+          unzip -q "$package_path" -d "$package_root"
+
+          loader="$package_root/build/native/x64/WebView2LoaderStatic.lib"
+          if [[ ! -f "$loader" ]]; then
+            echo "The WebView2 SDK package did not contain the x64 static loader." >&2
+            exit 1
+          fi
+
+          cp "$loader" artifacts/native-static/win-x64/WebView2LoaderStatic.lib
+
+      - name: Upload verified official native assets
         uses: actions/upload-artifact@v7
         with:
-          name: webui-native-${{ matrix.rid }}
-          path: native-install
+          name: webui-official-native
+          path: artifacts
           if-no-files-found: error
 
   package:
     name: Pack NuGet runtime assets
-    needs: build
+    needs: [build, official-assets]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -169,21 +187,8 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          path: artifacts/download
-
-      - name: Assemble RID native assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/native/{win-x64,linux-x64,linux-arm64,osx-x64,osx-arm64}
-          mkdir -p artifacts/native-static/win-x64
-          cp artifacts/download/webui-native-win-x64/bin/webui-2.dll artifacts/native/win-x64/webui-2.dll
-          cp artifacts/download/webui-native-linux-x64/lib/libwebui-2.so artifacts/native/linux-x64/libwebui-2.so
-          cp artifacts/download/webui-native-linux-arm64/lib/libwebui-2.so artifacts/native/linux-arm64/libwebui-2.so
-          cp artifacts/download/webui-native-osx-x64/lib/libwebui-2.dylib artifacts/native/osx-x64/libwebui-2.dylib
-          cp artifacts/download/webui-native-osx-arm64/lib/libwebui-2.dylib artifacts/native/osx-arm64/libwebui-2.dylib
-          cp artifacts/download/webui-native-win-x64/static/webui-2.lib artifacts/native-static/win-x64/webui-2.lib
-          cp artifacts/download/webui-native-win-x64/static/WebView2LoaderStatic.lib artifacts/native-static/win-x64/WebView2LoaderStatic.lib
+          name: webui-official-native
+          path: artifacts
 
       - uses: actions/setup-dotnet@v6
         with:
@@ -303,6 +308,32 @@ jobs:
           fi
 
           "$output/${{ matrix.executable }}"
+
+      - name: Verify official Windows DLL dependencies
+        if: matrix.rid == 'win-x64'
+        shell: pwsh
+        run: |
+          $library = Join-Path $PWD "artifacts/dynamic-package-smoke/webui-2.dll"
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $visualStudio = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          $dumpbin = Get-ChildItem "$visualStudio\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if ($null -eq $dumpbin) {
+            throw "Could not locate dumpbin.exe."
+          }
+
+          $dependencies = & $dumpbin.FullName /DEPENDENTS $library | Out-String
+          Write-Output $dependencies
+          if ($LASTEXITCODE -ne 0) {
+            throw "dumpbin failed with exit code $LASTEXITCODE."
+          }
+
+          if ($dependencies -match '(?im)^\s+(?:VCRUNTIME|MSVCP|api-ms-win-crt|ucrtbase).*\.dll\s*$') {
+            throw "The official WebUI DLL dynamically depends on the MSVC/UCRT runtime."
+          }
 
   static-package-smoke:
     name: Static package smoke (win-x64)

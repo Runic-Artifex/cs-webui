@@ -160,6 +160,10 @@ public static unsafe partial class WebUiNative
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial void SetIcon(nuint window, byte* icon, byte* iconType);
 
+    [LibraryImport(WebUiNativeLibrary.LibraryName, EntryPoint = "webui_set_icon_file")]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    public static partial void SetIconFile(nuint window, byte* path);
+
     [LibraryImport(WebUiNativeLibrary.LibraryName, EntryPoint = "webui_encode")]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     public static partial byte* Encode(byte* value);

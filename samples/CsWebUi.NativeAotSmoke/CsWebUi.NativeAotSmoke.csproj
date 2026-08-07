@@ -6,6 +6,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../../src/CsWebUi/CsWebUi.csproj" />
     <ProjectReference Include="../../src/CsWebUi.Native/CsWebUi.Native.csproj" />
   </ItemGroup>
 </Project>
