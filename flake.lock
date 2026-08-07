@@ -25,17 +25,17 @@
     "webui": {
       "flake": false,
       "locked": {
-        "lastModified": 1786119540,
-        "narHash": "sha256-1EiT4M4NF5HPaQi4EILxpOu53tiSmDTuvOzDpkN80ek=",
+        "lastModified": 1786119942,
+        "narHash": "sha256-NyGCAGP3/kLKAmi89IUBn36LjwrUYSR/boIh7zeruPI=",
         "owner": "Runic-Artifex",
         "repo": "webui",
-        "rev": "388852cbac3cc25efcc90b0c90c76633f75d3a77",
+        "rev": "a800dde44db1bffcea8d18ccdad5c2e5950940fa",
         "type": "github"
       },
       "original": {
         "owner": "Runic-Artifex",
         "repo": "webui",
-        "rev": "388852cbac3cc25efcc90b0c90c76633f75d3a77",
+        "rev": "a800dde44db1bffcea8d18ccdad5c2e5950940fa",
         "type": "github"
       }
     }

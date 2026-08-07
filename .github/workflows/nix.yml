@@ -32,4 +32,4 @@ jobs:
       - name: Test managed bindings against pinned native source
         run: >-
           nix develop .#default --accept-flake-config -c
-          dotnet test CsWebUi.sln --configuration Release
+          xvfb-run -a dotnet test CsWebUi.sln --configuration Release

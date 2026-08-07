@@ -5,7 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     webui = {
       # Runic fork revision carrying the server destroy lifecycle fix under test.
-      url = "github:Runic-Artifex/webui/388852cbac3cc25efcc90b0c90c76633f75d3a77";
+      url = "github:Runic-Artifex/webui/a800dde44db1bffcea8d18ccdad5c2e5950940fa";
       flake = false;
     };
   };
@@ -86,7 +86,7 @@
             chromium
             gtk3
             webkitgtk_4_1
-            xvfb
+            xvfb-run
           ];
           linuxLibraryPath = lib.makeLibraryPath linuxRuntimePackages;
         in
