@@ -12,21 +12,8 @@
 
   <ItemGroup>
     <ProjectReference Include="../CsWebUi.Native/CsWebUi.Native.csproj" />
-    <ProjectReference Include="../CsWebUi.Packer/CsWebUi.Packer.csproj"
-                      ReferenceOutputAssembly="false"
-                      PrivateAssets="all" />
     <None Include="$(MSBuildThisFileDirectory)..\..\README.md" Pack="true" PackagePath="" />
     <None Include="$(MSBuildThisFileDirectory)..\..\assets\webui_csharp.png" Pack="true" PackagePath="assets/" />
     <None Include="$(MSBuildThisFileDirectory)..\..\eng\licenses\WebUI-Logo-LICENSE.txt" Pack="true" PackagePath="licenses/WebUI-Logo/" />
-    <None Include="$(MSBuildThisFileDirectory)buildTransitive\CsWebUi.targets" Pack="true" PackagePath="buildTransitive/" />
-    <None Include="$(MSBuildThisFileDirectory)..\CsWebUi.Packer\bin\$(Configuration)\net10.0\CsWebUi.Packer.dll"
-          Pack="true"
-          PackagePath="tools/net10.0/" />
-    <None Include="$(MSBuildThisFileDirectory)..\CsWebUi.Packer\bin\$(Configuration)\net10.0\CsWebUi.Packer.deps.json"
-          Pack="true"
-          PackagePath="tools/net10.0/" />
-    <None Include="$(MSBuildThisFileDirectory)..\CsWebUi.Packer\bin\$(Configuration)\net10.0\CsWebUi.Packer.runtimeconfig.json"
-          Pack="true"
-          PackagePath="tools/net10.0/" />
   </ItemGroup>
 </Project>
