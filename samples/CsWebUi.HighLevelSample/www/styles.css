@@ -32,7 +32,7 @@ input {
 
 .brand {
   display: block;
-  width: min(280px, 70vw);
+  width: min(258px, 70vw);
   height: auto;
   margin-bottom: 2rem;
   filter: drop-shadow(0 .5rem 1.25rem rgb(0 0 0 / .18));

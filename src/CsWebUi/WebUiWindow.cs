@@ -11,12 +11,20 @@ namespace CsWebUi;
 public sealed unsafe class WebUiWindow : IDisposable
 {
     private static readonly ConcurrentDictionary<nuint, WebUiWindow> Windows = new();
+    private static readonly byte[] FileHandlerFailureResponse = Encoding.ASCII.GetBytes(
+        "HTTP/1.1 500 Internal Server Error\r\n" +
+        "Content-Type: text/plain; charset=utf-8\r\n" +
+        "Content-Length: 21\r\n" +
+        "Cache-Control: no-store\r\n" +
+        "X-Content-Type-Options: nosniff\r\n" +
+        "\r\n" +
+        "Internal Server Error");
 
     private readonly ConcurrentDictionary<nuint, BindingRegistration> _bindings = new();
     private readonly object _lifecycleGate = new();
     private readonly CancellationTokenSource _shutdown = new();
     private readonly nuint _id;
-    private WebUiVirtualFileSystem? _virtualFileSystem;
+    private FileHandlerRegistration? _fileHandler;
     private int _callbacksInFlight;
     private int _disposeRequested;
     private int _destroyed;
@@ -266,10 +274,35 @@ public sealed unsafe class WebUiWindow : IDisposable
     {
         ArgumentNullException.ThrowIfNull(fileSystem);
 
+        SetFileHandler(path => WebUiFileHandlerResult.FromResponse(fileSystem.GetHttpResponse(path)));
+    }
+
+    /// <summary>Sets a managed handler that returns complete raw HTTP responses for this window.</summary>
+    /// <remarks>
+    /// <para>
+    /// WebUI supplies a cleaned, URL-decoded path. The handler is retained until it is replaced or
+    /// the window is disposed. Response bytes are copied into WebUI-owned memory before this method
+    /// returns to native code, so the handler does not need to pin or retain its response buffer.
+    /// </para>
+    /// <para>
+    /// Returning <see cref="WebUiFileHandlerResult.NotHandled"/> allows WebUI to fall through to its
+    /// configured local root. Return an explicit HTTP error response when fallback must be closed.
+    /// Installing any custom file handler disables WebUI's authentication-cookie check process-wide;
+    /// custom handlers are intended for private, loopback-only windows unless the application adds
+    /// its own protection.
+    /// </para>
+    /// </remarks>
+    public void SetFileHandler(WebUiFileHandler handler, WebUiFileHandlerOptions? options = null)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        options ??= new WebUiFileHandlerOptions();
+        ArgumentOutOfRangeException.ThrowIfLessThan(options.MaxResponseBytes, 1);
+        var registration = new FileHandlerRegistration(handler, options.MaxResponseBytes);
+
         lock (_lifecycleGate)
         {
             ThrowIfDisposed();
-            Volatile.Write(ref _virtualFileSystem, fileSystem);
+            Volatile.Write(ref _fileHandler, registration);
             WebUiNative.SetFileHandlerWindow(_id, &FileHandlerTrampoline);
         }
     }
@@ -375,6 +408,18 @@ public sealed unsafe class WebUiWindow : IDisposable
         fixed (byte* value = bytes)
         {
             WebUiNative.SetProxy(_id, value);
+        }
+    }
+
+    /// <summary>Sets the icon file used by supported native window hosts.</summary>
+    /// <remarks>WebUI currently uses this path for the Linux GTK taskbar icon.</remarks>
+    public void SetIconFile(string path)
+    {
+        ThrowIfDisposed();
+        var bytes = Utf8.Encode(path, nameof(path));
+        fixed (byte* value = bytes)
+        {
+            WebUiNative.SetIconFile(_id, value);
         }
     }
 
@@ -522,31 +567,113 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
 
         *length = 0;
+        WebUiWindow? window = null;
+        var callbackStarted = false;
         try
         {
-            if (!Windows.TryGetValue(windowId, out var window)
-                || Volatile.Read(ref window._virtualFileSystem) is not { } fileSystem)
+            if (!Windows.TryGetValue(windowId, out window)
+                || !window.TryBeginCallback())
             {
+                CompleteNotHandledFileResponse(windowId);
                 return null;
             }
 
-            var response = fileSystem.GetHttpResponse(Utf8.DecodeRequired(path));
-            fixed (byte* pointer = response)
+            callbackStarted = true;
+            WebUiFileHandlerResult result;
+            try
             {
-                *length = response.Length;
-                if (WebUiApplication.AsynchronousResponsesEnabled)
-                {
-                    WebUiNative.InterfaceSetResponseFileHandler(windowId, pointer, response.Length);
-                    return null;
-                }
+                var registration = Volatile.Read(ref window._fileHandler);
+                result = registration is null
+                    ? WebUiFileHandlerResult.NotHandled
+                    : registration.Handler(Utf8.DecodeRequired(path));
 
-                return pointer;
+                if (result.IsHandled && result.Response.Length > registration!.MaxResponseBytes)
+                {
+                    throw new InvalidDataException(
+                        $"The file handler response exceeds the configured {registration.MaxResponseBytes} byte limit.");
+                }
             }
+            catch (Exception exception)
+            {
+                WebUiApplication.ReportUnhandledCallbackException(exception, window, null);
+                result = WebUiFileHandlerResult.FromResponse(FileHandlerFailureResponse);
+            }
+
+            if (!result.IsHandled)
+            {
+                CompleteNotHandledFileResponse(windowId);
+                return null;
+            }
+
+            return CopyFileResponseToNative(windowId, result.Response, length);
+        }
+        catch (Exception exception)
+        {
+            // No managed exception may cross the native HTTP callback boundary.
+            if (window is not null)
+            {
+                WebUiApplication.ReportUnhandledCallbackException(exception, window, null);
+            }
+
+            try
+            {
+                return CopyFileResponseToNative(windowId, FileHandlerFailureResponse, length);
+            }
+            catch
+            {
+                CompleteNotHandledFileResponse(windowId);
+                return null;
+            }
+        }
+        finally
+        {
+            if (callbackStarted)
+            {
+                window!.EndCallback();
+            }
+        }
+    }
+
+    private static void* CopyFileResponseToNative(
+        nuint windowId,
+        ReadOnlyMemory<byte> response,
+        int* length)
+    {
+        var responseLength = response.Length;
+        void* nativeResponse = WebUiNative.Malloc((nuint)responseLength);
+        if (nativeResponse is null)
+        {
+            throw new InvalidOperationException("WebUI could not allocate a file-response buffer.");
+        }
+
+        try
+        {
+            fixed (byte* source = response.Span)
+            {
+                WebUiNative.Memcpy(nativeResponse, source, (nuint)responseLength);
+            }
+
+            *length = responseLength;
+            if (WebUiApplication.AsynchronousResponsesEnabled)
+            {
+                WebUiNative.InterfaceSetResponseFileHandler(windowId, nativeResponse, responseLength);
+                return null;
+            }
+
+            return nativeResponse;
         }
         catch
         {
-            // No managed exception may cross the native HTTP callback boundary.
-            return null;
+            WebUiNative.Free(nativeResponse);
+            throw;
+        }
+    }
+
+    private static void CompleteNotHandledFileResponse(nuint windowId)
+    {
+        if (WebUiApplication.AsynchronousResponsesEnabled)
+        {
+            WebUiNative.InterfaceSetResponseFileHandler(windowId, null, 0);
         }
     }
 
@@ -665,7 +792,7 @@ public sealed unsafe class WebUiWindow : IDisposable
 
         Windows.TryRemove(_id, out _);
         WebUiNative.Destroy(_id);
-        Volatile.Write(ref _virtualFileSystem, null);
+        Volatile.Write(ref _fileHandler, null);
         _shutdown.Dispose();
     }
 
@@ -685,5 +812,18 @@ public sealed unsafe class WebUiWindow : IDisposable
         internal Func<WebUiEvent, CancellationToken, ValueTask<WebUiResult>> Handler { get; }
 
         internal bool IsAsync { get; }
+    }
+
+    private sealed class FileHandlerRegistration
+    {
+        internal FileHandlerRegistration(WebUiFileHandler handler, int maxResponseBytes)
+        {
+            Handler = handler;
+            MaxResponseBytes = maxResponseBytes;
+        }
+
+        internal WebUiFileHandler Handler { get; }
+
+        internal int MaxResponseBytes { get; }
     }
 }

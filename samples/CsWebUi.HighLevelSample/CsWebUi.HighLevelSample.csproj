@@ -8,7 +8,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="../../assets/cswebui-logo.svg" Link="www/cswebui-logo.svg">
+    <None Include="../../assets/webui_csharp.png" Link="www/webui_csharp.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>

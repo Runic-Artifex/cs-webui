@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     webui = {
-      url = "github:webui-dev/webui/c32f702178b311d7a3ceba107dc2ec3ef3f8f230";
+      url = "github:webui-dev/webui/b08e7b8b0732316c8f0d543091ee4c7b4904f4dc";
       flake = false;
     };
   };
@@ -93,10 +93,13 @@
             packages = with pkgs; [
               clang
               cmake
+              curl
               dotnet-sdk_10
               git
+              jq
               ninja
               pkg-config
+              unzip
             ] ++ linuxRuntimePackages;
 
             shellHook = ''

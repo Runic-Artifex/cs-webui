@@ -17,10 +17,13 @@
   <ItemGroup>
     <None Include="$(MSBuildThisFileDirectory)..\..\README.md" Pack="true" PackagePath="" />
     <None Include="$(MSBuildThisFileDirectory)..\..\NOTICE" Pack="true" PackagePath="" />
-    <None Include="$(MSBuildThisFileDirectory)..\..\assets\cswebui-logo.svg" Pack="true" PackagePath="assets/" />
+    <None Include="$(MSBuildThisFileDirectory)..\..\assets\webui_csharp.png" Pack="true" PackagePath="assets/" />
     <None Include="$(MSBuildThisFileDirectory)buildTransitive\CsWebUi.Native.targets" Pack="true" PackagePath="buildTransitive/" />
+    <None Include="$(MSBuildThisFileDirectory)..\..\eng\licenses\WebUI-LICENSE.txt" Pack="true" PackagePath="licenses/WebUI/" />
+    <None Include="$(MSBuildThisFileDirectory)..\..\eng\licenses\WebUI-Logo-LICENSE.txt" Pack="true" PackagePath="licenses/WebUI-Logo/" />
     <None Include="$(MSBuildThisFileDirectory)..\..\eng\licenses\WebView2-LICENSE.txt" Pack="true" PackagePath="licenses/WebView2/" />
     <None Include="$(MSBuildThisFileDirectory)..\..\eng\licenses\WebView2-NOTICE.txt" Pack="true" PackagePath="licenses/WebView2/" />
+    <None Include="$(MSBuildThisFileDirectory)..\..\eng\webui-nightly-assets.json" Pack="true" PackagePath="provenance/WebUI/" />
   </ItemGroup>
 
   <ItemGroup Condition="Exists('$(NativeAssetsRoot)')">
