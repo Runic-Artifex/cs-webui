@@ -6,6 +6,7 @@
     <RootNamespace>CsWebUi</RootNamespace>
     <NoWarn>$(NoWarn);1591;CA1720</NoWarn>
     <PackageId>CsWebUi</PackageId>
+    <Title>CS-WebUI</Title>
     <Description>Safe, ergonomic .NET 10 window and callback abstractions for WebUI.</Description>
     <PackageTags>runic-artifex;webui;dotnet;bindings;aot;desktop</PackageTags>
   </PropertyGroup>

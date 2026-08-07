@@ -17,10 +17,10 @@ window.Show("""
     <head>
       <meta charset="utf-8">
       <script src="webui.js"></script>
-      <title>CsWebUi</title>
+      <title>CS-WebUI</title>
     </head>
     <body>
-      <h1>CsWebUi is running</h1>
+      <h1>CS-WebUI is running</h1>
       <button onclick="multiply(6, 7).then(value => alert(`6 × 7 = ${value}`))">Multiply</button>
       <button onclick="greet('WebUI').then(alert)">Greet</button>
     </body>

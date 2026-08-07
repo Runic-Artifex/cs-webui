@@ -61,7 +61,7 @@ using (var window = new WebUiWindow())
     window.Bind("exitApplication", static _ => WebUiApplication.Exit());
 
     window.Show("index.html");
-    Console.WriteLine($"CsWebUi High-Level Sample is running at {window.Url}");
+    Console.WriteLine($"CS-WebUI High-Level Sample is running at {window.Url}");
     WebUiApplication.Wait();
 }
 

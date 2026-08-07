@@ -1,6 +1,8 @@
-# CsWebUi High-Level Sample
+# CS-WebUI High-Level Sample
 
-This sample is a complete small application built only with `CsWebUi`'s high-level API. It serves a local HTML/CSS/JavaScript application through WebUI and demonstrates:
+This sample is a complete small application built only with the `CsWebUi`
+package's high-level API. It serves a local HTML/CSS/JavaScript application
+through WebUI and demonstrates:
 
 - deterministic `WebUiWindow` ownership and cleanup;
 - synchronous typed callbacks and `WebUiResult` responses;

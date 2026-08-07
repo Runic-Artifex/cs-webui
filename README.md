@@ -1,8 +1,8 @@
 <div align="center">
 
-![WebUI and C#](https://raw.githubusercontent.com/Runic-Artifex/cs-webui/main/assets/webui_csharp.png)
+![CS-WebUI logo](https://raw.githubusercontent.com/Runic-Artifex/cs-webui/main/assets/webui_csharp.png)
 
-# CsWebUi v2.5.0-beta.4.4
+# CS-WebUI v2.5.0-beta.4.4
 
 [last-commit]: https://img.shields.io/github/last-commit/Runic-Artifex/cs-webui?style=for-the-badge&logo=github&logoColor=C0CAF5&labelColor=414868
 [release-version]: https://img.shields.io/github/v/tag/Runic-Artifex/cs-webui?style=for-the-badge&logo=webtrees&logoColor=C0CAF5&labelColor=414868&color=7664C6
@@ -21,13 +21,13 @@
 
 </div>
 
-CsWebUi provides modern .NET 10 bindings for
-[WebUI](https://github.com/webui-dev/webui). `CsWebUi.Native` is a complete,
-unsafe binding over the WebUI 2.5 C ABI, while `CsWebUi` adds deterministic
-window ownership, UTF-8 conversion, error handling, raw-data helpers, and safe
-synchronous or `ValueTask`-based callbacks.
+CS-WebUI provides modern .NET 10 bindings for
+[WebUI](https://github.com/webui-dev/webui). The `CsWebUi.Native` package is a
+complete, unsafe binding over the WebUI 2.5 C ABI, while the `CsWebUi` package
+adds deterministic window ownership, UTF-8 conversion, error handling,
+raw-data helpers, and safe synchronous or `ValueTask`-based callbacks.
 
-> CsWebUi follows WebUI's 2.5 beta ABI and is currently released as a
+> CS-WebUI follows WebUI's 2.5 beta ABI and is currently released as a
 > prerelease package.
 
 ## Features
@@ -88,7 +88,7 @@ automatically opt WebUI into its asynchronous-response mode; return a
   browsers, WebViews, and JavaScript bridge shared by all language wrappers.
 - [Runic Assets](https://github.com/Runic-Artifex/runic-assets) provides Vite
   packing, embedded assets, development refresh, cache policy, and direct
-  CsWebUi delivery.
+  `CsWebUi` package delivery.
 
 ## Supported platforms
 
@@ -182,7 +182,7 @@ Alternatively set `CSWEBUI_NATIVE_LIBRARY` to a library file or its containing d
 
 ## Upstream conformance and provenance
 
-CsWebUi covers the exported WebUI v2.5 C ABI. CI compares every `WEBUI_EXPORT`
+CS-WebUI covers the exported WebUI v2.5 C ABI. CI compares every `WEBUI_EXPORT`
 in the pinned official `webui.h` with `CsWebUi.Native` and fails if either
 surface drifts. The higher-level `CsWebUi` package builds on that complete
 low-level layer with managed ownership and callback APIs.
@@ -232,5 +232,5 @@ nix flake check
 
 ## License
 
-CsWebUi is MIT licensed. WebUI and the official WebUI C# logo are also MIT
+CS-WebUI is MIT licensed. WebUI and the official WebUI C# logo are also MIT
 licensed; their attributions are retained in [NOTICE](NOTICE).
