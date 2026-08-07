@@ -1,8 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-    <IsPackable>false</IsPackable>
-    <AssemblyName>CsWebUi.Packer</AssemblyName>
-    <RootNamespace>CsWebUi.Packer</RootNamespace>
-  </PropertyGroup>
-</Project>

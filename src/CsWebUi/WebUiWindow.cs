@@ -262,21 +262,6 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
     }
 
-    /// <summary>
-    /// Serves files for this window from an immutable in-memory virtual file system.
-    /// </summary>
-    /// <remarks>
-    /// Call this before <see cref="Show(string)"/> or <see cref="StartServer(string)"/>.
-    /// The file system is retained for the lifetime of the window and may be shared by
-    /// multiple windows.
-    /// </remarks>
-    public void SetVirtualFileSystem(WebUiVirtualFileSystem fileSystem)
-    {
-        ArgumentNullException.ThrowIfNull(fileSystem);
-
-        SetFileHandler(path => WebUiFileHandlerResult.FromResponse(fileSystem.GetHttpResponse(path)));
-    }
-
     /// <summary>Sets a managed handler that returns complete raw HTTP responses for this window.</summary>
     /// <remarks>
     /// <para>
