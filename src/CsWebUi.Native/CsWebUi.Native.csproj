@@ -8,6 +8,7 @@
     <IsAotCompatible>true</IsAotCompatible>
     <IsTrimmable>true</IsTrimmable>
     <PackageId>CsWebUi.Native</PackageId>
+    <Title>CS-WebUI Native</Title>
     <Description>Near-native, NativeAOT-compatible .NET 10 bindings for the WebUI C ABI.</Description>
     <PackageTags>runic-artifex;webui;native;interop;aot</PackageTags>
     <NativeAssetsRoot Condition="'$(NativeAssetsRoot)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\native</NativeAssetsRoot>
