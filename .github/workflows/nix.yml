@@ -29,5 +29,7 @@ jobs:
       - name: Build native WebUI package
         run: nix build .#webui-native --accept-flake-config
 
-      - name: Verify the development shell
-        run: nix develop .#default --accept-flake-config -c dotnet --info
+      - name: Test managed bindings against pinned native source
+        run: >-
+          nix develop .#default --accept-flake-config -c
+          xvfb-run -a dotnet test CsWebUi.sln --configuration Release

@@ -4,7 +4,8 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     webui = {
-      url = "github:webui-dev/webui/b08e7b8b0732316c8f0d543091ee4c7b4904f4dc";
+      # Runic fork revision carrying the server destroy lifecycle fix under test.
+      url = "github:Runic-Artifex/webui/a800dde44db1bffcea8d18ccdad5c2e5950940fa";
       flake = false;
     };
   };
@@ -39,6 +40,7 @@
             cmakeFlags = [
               "-DBUILD_SHARED_LIBS=ON"
               "-DWEBUI_BUILD_EXAMPLES=OFF"
+              "-DBUILD_TESTING=OFF"
               "-DWEBUI_OUT_LIB_NAME=webui-2"
               "-DWEBUI_USE_TLS=OFF"
             ];
@@ -84,7 +86,7 @@
             chromium
             gtk3
             webkitgtk_4_1
-            xvfb
+            xvfb-run
           ];
           linuxLibraryPath = lib.makeLibraryPath linuxRuntimePackages;
         in
