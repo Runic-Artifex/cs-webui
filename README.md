@@ -1,3 +1,5 @@
+![CsWebUi banner](https://raw.githubusercontent.com/Runic-Artifex/cs-webui/main/.github/assets/brand/banner.png)
+
 <div align="center">
 
 ![CS-WebUI logo](https://raw.githubusercontent.com/Runic-Artifex/cs-webui/main/assets/webui_csharp.png)

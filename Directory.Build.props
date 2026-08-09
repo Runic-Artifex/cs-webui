@@ -34,5 +34,10 @@
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <PackageProjectUrl>https://github.com/Runic-Artifex/cs-webui</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageIcon>icon.png</PackageIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory).github/assets/brand/icon.png" Pack="true" PackagePath="\" Visible="false" />
+  </ItemGroup>
 </Project>
