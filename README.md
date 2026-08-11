@@ -1,4 +1,4 @@
-![CsWebUi banner](https://raw.githubusercontent.com/Runic-Artifex/cs-webui/main/.github/assets/brand/banner.png)
+![CS-WebUI banner](https://raw.githubusercontent.com/Runic-Artifex/cs-webui/main/.github/assets/brand/banner.png)
 
 <div align="center">
 
