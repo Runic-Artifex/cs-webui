@@ -46,7 +46,7 @@
             ];
 
             meta = with pkgs.lib; {
-              description = "WebUI native shared library used by CsWebUi";
+              description = "WebUI native shared library used by CS-WebUI";
               homepage = "https://webui.me/";
               license = licenses.mit;
               platforms = platforms.unix;

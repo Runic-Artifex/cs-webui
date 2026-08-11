@@ -1,6 +1,6 @@
-# Releasing CsWebUi
+# Releasing CS-WebUI
 
-CsWebUi already publishes its two NuGet packages through the `NuGet Gallery`
+CS-WebUI already publishes its two NuGet packages through the `NuGet Gallery`
 workflow when a GitHub release is published. Its nuget.org trusted-publisher
 policy is bound to `.github/workflows/nuget-gallery.yml` and the `nuget`
 environment; keep that workflow identity until the registry policy is migrated
@@ -8,12 +8,12 @@ deliberately.
 
 Before publishing a release, verify that the release tag exactly matches the
 project package version, all package and NativeAOT checks pass, and the `nuget`
-environment variable `NUGET_USER` names the nuget.org account. CsWebUi can keep
+environment variable `NUGET_USER` names the nuget.org account. CS-WebUI can keep
 releasing independently of the Runic Toolkit package family.
 
 ## Updating the official WebUI nightly
 
-WebUI's `nightly` release tag and assets are mutable. CsWebUi therefore pins
+WebUI's `nightly` release tag and assets are mutable. CS-WebUI therefore pins
 the release's source commit and every archive SHA-256 in
 `eng/webui-nightly-assets.json`. The bootstrap fails closed when the upstream
 release moves; never weaken or skip that check to make a release pass.
