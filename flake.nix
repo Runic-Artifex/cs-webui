@@ -100,6 +100,7 @@
               git
               jq
               ninja
+              nodejs_24
               pkg-config
               unzip
             ] ++ linuxRuntimePackages;
