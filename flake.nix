@@ -4,8 +4,9 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     webui = {
-      # Runic fork revision carrying the server destroy lifecycle fix under test.
-      url = "github:Runic-Artifex/webui/a800dde44db1bffcea8d18ccdad5c2e5950940fa";
+      # Match the exact official upstream revision selected by the maintained
+      # nightly-asset authority.
+      url = "github:webui-dev/webui/52f9e75b92faf9a23fd150b3c60051c4ec85fc69";
       flake = false;
     };
   };
