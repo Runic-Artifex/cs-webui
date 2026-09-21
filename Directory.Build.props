@@ -25,9 +25,9 @@
     <RepositoryType Condition="'$(RepositoryType)' == ''">git</RepositoryType>
 
     <VersionPrefix>2.5.0</VersionPrefix>
-    <VersionSuffix>beta.4.4</VersionSuffix>
+    <VersionSuffix>beta.4.5</VersionSuffix>
     <AssemblyVersion>2.5.0.0</AssemblyVersion>
-    <FileVersion>2.5.0.4</FileVersion>
+    <FileVersion>2.5.0.5</FileVersion>
     <Authors>Viktor Jannicke</Authors>
     <Copyright>Copyright (c) 2026 Viktor Jannicke</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
