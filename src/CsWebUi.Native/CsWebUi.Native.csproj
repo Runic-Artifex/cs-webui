@@ -16,7 +16,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <None Include="$(MSBuildThisFileDirectory)..\..\README.md" Pack="true" PackagePath="" />
+    <None Update="README.md" Pack="true" PackagePath="" />
     <None Include="$(MSBuildThisFileDirectory)..\..\NOTICE" Pack="true" PackagePath="" />
     <None Include="$(MSBuildThisFileDirectory)..\..\assets\webui_csharp.png" Pack="true" PackagePath="assets/" />
     <None Include="$(MSBuildThisFileDirectory)buildTransitive\CsWebUi.Native.targets" Pack="true" PackagePath="buildTransitive/" />

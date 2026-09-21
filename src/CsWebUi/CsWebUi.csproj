@@ -13,7 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="../CsWebUi.Native/CsWebUi.Native.csproj" />
-    <None Include="$(MSBuildThisFileDirectory)..\..\README.md" Pack="true" PackagePath="" />
+    <None Update="README.md" Pack="true" PackagePath="" />
     <None Include="$(MSBuildThisFileDirectory)..\..\assets\webui_csharp.png" Pack="true" PackagePath="assets/" />
     <None Include="$(MSBuildThisFileDirectory)..\..\eng\licenses\WebUI-Logo-LICENSE.txt" Pack="true" PackagePath="licenses/WebUI-Logo/" />
   </ItemGroup>
