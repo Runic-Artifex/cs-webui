@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   prepare:
-    name: Validate pinned WebUI test source
+    name: Validate pinned official WebUI source
     runs-on: ubuntu-24.04
     outputs:
       repository: ${{ steps.webui-revision.outputs.repository }}
@@ -27,18 +27,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Read pinned WebUI revision
+      - name: Read and validate pinned official WebUI revision
         id: webui-revision
         shell: bash
         run: |
           set -euo pipefail
-          owner=$(jq -er '.nodes.webui.locked.owner | select(length > 0)' flake.lock)
-          repository_name=$(jq -er '.nodes.webui.locked.repo | select(length > 0)' flake.lock)
+          owner=$(jq -er '.nodes.webui.locked.owner | select(test("^[A-Za-z0-9_.-]+$"))' flake.lock)
+          repository_name=$(jq -er '.nodes.webui.locked.repo | select(test("^[A-Za-z0-9_.-]+$"))' flake.lock)
           revision=$(jq -er '.nodes.webui.locked.rev | select(test("^[0-9a-f]{40}$"))' flake.lock)
-          echo "repository=$owner/$repository_name" >> "$GITHUB_OUTPUT"
+
+          repository="$owner/$repository_name"
+          manifest_repository=$(jq -er '.repository | select(test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))' eng/webui-nightly-assets.json)
+          manifest_revision=$(jq -er '.commit | select(test("^[0-9a-f]{40}$"))' eng/webui-nightly-assets.json)
+
+          if [[ "$manifest_repository" != "webui-dev/webui" ]]; then
+            echo "The native asset manifest must select the official webui-dev/webui repository." >&2
+            exit 1
+          fi
+          if [[ "$repository" != "$manifest_repository" || "$revision" != "$manifest_revision" ]]; then
+            echo "flake.lock must pin the manifest's exact official WebUI repository and revision." >&2
+            echo "flake.lock: $repository@$revision" >&2
+            echo "manifest:   $manifest_repository@$manifest_revision" >&2
+            exit 1
+          fi
+
+          echo "repository=$repository" >> "$GITHUB_OUTPUT"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
 
-      - name: Check out pinned WebUI source
+      - name: Check out pinned official WebUI source
         uses: actions/checkout@v7
         with:
           repository: ${{ steps.webui-revision.outputs.repository }}
@@ -70,7 +86,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Check out pinned WebUI source
+      - name: Check out pinned official WebUI source
         uses: actions/checkout@v7
         with:
           repository: ${{ needs.prepare.outputs.repository }}
