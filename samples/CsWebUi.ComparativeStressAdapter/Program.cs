@@ -19,7 +19,7 @@ headers.CopyTo(response, 0);
 payload.CopyTo(response, headers.Length);
 var allocatedBefore = GC.GetTotalAllocatedBytes(precise: true);
 
-var window = new WebUiWindow();
+using var window = new WebUiWindow();
 window.SetFileHandler(_ => WebUiFileHandlerResult.FromResponse(response));
 var baseUrl = new Uri(window.StartServer("<html></html>"));
 
@@ -34,7 +34,7 @@ Write(new
     implementationAssemblySha256 = Hash(typeof(WebUiWindow).Assembly.Location),
     nativeLibrarySha256 = Hash(Environment.GetEnvironmentVariable("CSWEBUI_NATIVE_LIBRARY")
         ?? throw new InvalidOperationException("CSWEBUI_NATIVE_LIBRARY is required.")),
-    shutdownBoundary = "process-exit-after-native-server-only-destroy-fault",
+    shutdownBoundary = "managed-disposal-after-server-only-stress",
 });
 
 if (!string.Equals(await Console.In.ReadLineAsync(), "stop", StringComparison.Ordinal))
@@ -50,10 +50,6 @@ Write(new
     managedAllocatedBytes = GC.GetTotalAllocatedBytes(precise: true) - allocatedBefore,
     peakWorkingSetBytes = process.PeakWorkingSet64,
 });
-// The maintained CS-WebUI baseline currently faults while destroying a
-// server-only window. Preserve that baseline behavior as an explicit process
-// boundary instead of allowing it to invalidate completed measurements.
-Environment.Exit(0);
 return 0;
 
 static int ReadPayloadSize()

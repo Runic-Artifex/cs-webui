@@ -4,7 +4,7 @@
 
 ![CS-WebUI logo](https://raw.githubusercontent.com/Runic-Artifex/cs-webui/main/assets/webui_csharp.png)
 
-# CS-WebUI v2.5.0-beta.4.4
+# CS-WebUI
 
 [last-commit]: https://img.shields.io/github/last-commit/Runic-Artifex/cs-webui?style=for-the-badge&logo=github&logoColor=C0CAF5&labelColor=414868
 [release-version]: https://img.shields.io/github/v/tag/Runic-Artifex/cs-webui?style=for-the-badge&logo=webtrees&logoColor=C0CAF5&labelColor=414868&color=7664C6
@@ -39,6 +39,8 @@ raw-data helpers, and safe synchronous or `ValueTask`-based callbacks.
 - Windows, Linux, and macOS packages for x64 and Arm64 where available.
 - Complete low-level C ABI plus an idiomatic, ownership-safe managed API.
 - Synchronous and asynchronous JavaScript-to-.NET bindings.
+- Browser selection, event-blocking, frameless and transparent WebView,
+  custom-parameter, and in-memory icon controls.
 - Trimming and NativeAOT-oriented, including optional static linking on
   Windows x64.
 - Policy-free custom HTTP responses for asset and framework integrations.
@@ -79,6 +81,10 @@ WebUiApplication.Wait();
 destruction until active managed callbacks finish. Async bindings
 automatically opt WebUI into its asynchronous-response mode; return a
 `WebUiResult` to resolve the JavaScript promise.
+
+The comparative stress adapter serves real HTTP traffic and then exits through
+normal managed disposal. The package smoke repeats that server-only lifecycle
+without launching a browser on every supported runtime in CI.
 
 ## Documentation and examples
 
@@ -184,22 +190,21 @@ Alternatively set `CSWEBUI_NATIVE_LIBRARY` to a library file or its containing d
 
 ## Upstream conformance and provenance
 
-CS-WebUI covers the exported WebUI v2.5 C ABI. CI compares every `WEBUI_EXPORT`
-in both the pinned test-source header and the verified official asset headers
-with `CsWebUi.Native`, and fails if either surface drifts. The higher-level
-`CsWebUi` package builds on that complete low-level layer with managed ownership
-and callback APIs.
+CS-WebUI covers the exported WebUI v2.5 C ABI. CI compares the complete
+`WEBUI_EXPORT` symbol set in the pinned official source header and every
+verified official archive header with `CsWebUi.Native`, and fails if any
+surface drifts. The higher-level `CsWebUi` package builds on that complete
+low-level layer with managed ownership and callback APIs.
 
 No WebUI native binaries are committed to this repository. Release workflows
 bootstrap the official [`webui-dev/webui`](https://github.com/webui-dev/webui)
 nightly archives for the exact revision and SHA-256 digests recorded in
 [`eng/webui-nightly-assets.json`](eng/webui-nightly-assets.json). The archives'
 headers must agree with one another and the complete managed ABI before their
-native libraries can enter a NuGet package. A separate required matrix builds
-the source revision pinned in `flake.lock` on every supported platform and runs
-its native lifecycle regression. This lets CS-WebUI validate a fix from the
-[`Runic-Artifex/webui`](https://github.com/Runic-Artifex/webui) fork without
-publishing fork-built binaries.
+native libraries can enter a NuGet package. The same official repository and
+revision must be pinned in `flake.lock`; CI rejects any mismatch before a
+separate required matrix builds that source on every supported platform and
+runs its native lifecycle regression.
 
 Maintainers can reproduce the verified official-asset bootstrap locally:
 
@@ -210,8 +215,8 @@ nix develop . -c ./eng/bootstrap-webui.sh "$output"
 
 ## NixOS development
 
-The flake pins both Nixpkgs and the WebUI source revision used for development
-and source-build testing. It builds `webui-2`, exposes it through
+The flake pins both Nixpkgs and the same official WebUI source revision selected
+by the release-asset manifest. It builds `webui-2`, exposes it through
 `CSWEBUI_NATIVE_LIBRARY`, and includes .NET 10, CMake, Chromium, Xvfb, and Linux
 WebView dependencies.
 

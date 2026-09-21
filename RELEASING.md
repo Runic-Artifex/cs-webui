@@ -13,10 +13,12 @@ releasing independently of the Runic Toolkit package family.
 
 ## Updating the official WebUI nightly
 
-WebUI's `nightly` release tag and assets are mutable. CS-WebUI therefore pins
-the release's source commit and every archive SHA-256 in
-`eng/webui-nightly-assets.json`. The bootstrap fails closed when the upstream
-release moves; never weaken or skip that check to make a release pass.
+WebUI's `nightly` release tag and assets are mutable. The official release
+authority for CS-WebUI is therefore `eng/webui-nightly-assets.json`, which pins
+the `webui-dev/webui` repository, source commit, version, archive names, and
+every archive SHA-256. The bootstrap fails closed when the upstream release
+moves; never weaken or skip that check to make a release pass. The `webui`
+entry in `flake.lock` must pin the same official repository and exact commit.
 
 To adopt a newer nightly deliberately:
 
@@ -26,10 +28,9 @@ To adopt a newer nightly deliberately:
    `eng/webui-nightly-assets.json`.
 3. Update `CsWebUi.Native` for any ABI additions until
    `eng/validate-webui-abi.sh` passes against the downloaded header.
-4. Deliberately update the independently tested source revision in `flake.nix`
-   when the fork or upstream source used for development should advance, then
-   run `nix flake update webui --accept-flake-config`. It does not need to match
-   the official binary revision, but its exported ABI must remain compatible.
+4. Update the official source revision in `flake.nix`, then run
+   `nix flake update webui --accept-flake-config`. Confirm the resulting
+   `flake.lock` repository and 40-character revision exactly match the manifest.
 5. Run the verified bootstrap and both verification paths:
 
    ```bash
@@ -42,5 +43,6 @@ To adopt a newer nightly deliberately:
    ```
 
 The NuGet workflow packages only the bootstrapped official archives. Its
-separate source-build matrix and lifecycle regression must also succeed for the
-test-source revision pinned in `flake.lock`.
+separate source-build matrix, native lifecycle regression, and package-consumer
+server lifecycle must also succeed for the same official revision pinned in
+`flake.lock`.
