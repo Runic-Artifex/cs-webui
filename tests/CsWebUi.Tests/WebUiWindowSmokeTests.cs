@@ -19,7 +19,18 @@ public sealed class WebUiWindowSmokeTests
     public void HighLevelWindowOwnsAndDestroysANativeWindowWhenConfigured()
     {
         using var window = new WebUiWindow();
+
+        window.SetEventBlocking(true);
+        window.SetEventBlocking(false);
+        window.SetFrameless(true);
+        window.SetFrameless(false);
+        window.SetTransparent(true);
+        window.SetTransparent(false);
+        window.SetCustomParameters("--disable-gpu");
+        window.SetIcon("<svg xmlns=\"http://www.w3.org/2000/svg\"/>", "image/svg+xml");
+
         Assert.NotEqual((nuint)0, window.Id);
         Assert.False(window.IsShown);
+        Assert.InRange(window.BestBrowser, WebUiBrowser.NoBrowser, WebUiBrowser.WebView);
     }
 }

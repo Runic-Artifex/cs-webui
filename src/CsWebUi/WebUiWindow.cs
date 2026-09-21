@@ -102,6 +102,16 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
     }
 
+    /// <summary>Gets the browser WebUI considers the best available choice for this window.</summary>
+    public WebUiBrowser BestBrowser
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return (WebUiBrowser)(uint)WebUiNative.GetBestBrowser(_id);
+        }
+    }
+
     /// <summary>Binds an element or JavaScript object to a synchronous action.</summary>
     /// <param name="element">The element name; an empty string receives every event.</param>
     /// <param name="handler">The callback to invoke.</param>
@@ -323,6 +333,27 @@ public sealed unsafe class WebUiWindow : IDisposable
         WebUiNative.SetResizable(_id, WebUiApplication.NativeBoolean(enabled));
     }
 
+    /// <summary>Sets whether callbacks for this window block the WebUI event thread.</summary>
+    public void SetEventBlocking(bool enabled)
+    {
+        ThrowIfDisposed();
+        WebUiNative.SetEventBlocking(_id, WebUiApplication.NativeBoolean(enabled));
+    }
+
+    /// <summary>Sets whether the native WebView uses a borderless window frame.</summary>
+    public void SetFrameless(bool enabled)
+    {
+        ThrowIfDisposed();
+        WebUiNative.SetFrameless(_id, WebUiApplication.NativeBoolean(enabled));
+    }
+
+    /// <summary>Sets whether the native WebView background is transparent.</summary>
+    public void SetTransparent(bool enabled)
+    {
+        ThrowIfDisposed();
+        WebUiNative.SetTransparent(_id, WebUiApplication.NativeBoolean(enabled));
+    }
+
     /// <summary>Sets whether WebUI's high-contrast mode is enabled for this window.</summary>
     public void SetHighContrast(bool enabled)
     {
@@ -393,6 +424,32 @@ public sealed unsafe class WebUiWindow : IDisposable
         fixed (byte* value = bytes)
         {
             WebUiNative.SetProxy(_id, value);
+        }
+    }
+
+    /// <summary>Sets extra command-line parameters passed to the launched browser.</summary>
+    public void SetCustomParameters(string parameters)
+    {
+        ThrowIfDisposed();
+        var bytes = Utf8.Encode(parameters, nameof(parameters));
+        fixed (byte* value = bytes)
+        {
+            WebUiNative.SetCustomParameters(_id, value);
+        }
+    }
+
+    /// <summary>Sets the icon served to browser clients for this window.</summary>
+    /// <param name="icon">The textual icon data, such as an SVG document.</param>
+    /// <param name="mimeType">The icon MIME type, such as <c>image/svg+xml</c>.</param>
+    public void SetIcon(string icon, string mimeType)
+    {
+        ThrowIfDisposed();
+        var iconBytes = Utf8.Encode(icon, nameof(icon));
+        var mimeTypeBytes = Utf8.Encode(mimeType, nameof(mimeType));
+        fixed (byte* iconValue = iconBytes)
+        fixed (byte* mimeTypeValue = mimeTypeBytes)
+        {
+            WebUiNative.SetIcon(_id, iconValue, mimeTypeValue);
         }
     }
 
