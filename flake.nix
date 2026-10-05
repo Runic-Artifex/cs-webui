@@ -6,7 +6,7 @@
     webui = {
       # Match the exact official upstream revision selected by the maintained
       # nightly-asset authority.
-      url = "github:webui-dev/webui/52f9e75b92faf9a23fd150b3c60051c4ec85fc69";
+      url = "github:webui-dev/webui/f1b28eeeecfc2d63bdb4d4857c6f137468c6d6f6";
       flake = false;
     };
   };
