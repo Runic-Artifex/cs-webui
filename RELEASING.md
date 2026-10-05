@@ -46,3 +46,12 @@ The NuGet workflow packages only the bootstrapped official archives. Its
 separate source-build matrix, native lifecycle regression, and package-consumer
 server lifecycle must also succeed for the same official revision pinned in
 `flake.lock`.
+
+The verified bootstrap also preserves the original ZIP bytes under
+`official-archives/<commit>/`, together with the manifest, release API metadata,
+commit marker, and canonical header. The `webui-official-archives` Actions
+artifact retains that evidence separately from the extracted package inputs.
+Actions artifacts expire; retain these exact files as assets on the versioned
+CS-WebUI release when publishing so that a moved upstream nightly does not erase
+the archive evidence. Retaining archives does not make the bootstrap accept an
+old nightly: its official release commit and digest checks remain mandatory.

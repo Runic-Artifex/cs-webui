@@ -75,14 +75,19 @@ jobs:
         include:
           - os: ubuntu-24.04
             rid: linux-x64
+            installed_library: lib/libwebui-2.so
           - os: ubuntu-24.04-arm
             rid: linux-arm64
+            installed_library: lib/libwebui-2.so
           - os: windows-2022
             rid: win-x64
+            installed_library: bin/webui-2.dll
           - os: macos-15-intel
             rid: osx-x64
+            installed_library: lib/libwebui-2.dylib
           - os: macos-14
             rid: osx-arm64
+            installed_library: lib/libwebui-2.dylib
     steps:
       - uses: actions/checkout@v7
 
@@ -97,7 +102,6 @@ jobs:
         run: >-
           cmake -S .upstream/webui -B native-build
           -DBUILD_SHARED_LIBS=ON
-          -DBUILD_TESTING=ON
           -DWEBUI_BUILD_EXAMPLES=OFF
           -DWEBUI_OUT_LIB_NAME=webui-2
           -DWEBUI_USE_TLS=OFF
@@ -106,11 +110,20 @@ jobs:
       - name: Build shared library
         run: cmake --build native-build --config Release --parallel
 
-      - name: Run native lifecycle regression
-        run: ctest --test-dir native-build --build-config Release --output-on-failure
-
       - name: Install shared library
         run: cmake --install native-build --prefix native-install --config Release
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Run native lifecycle regression against the source build
+        env:
+          CSWEBUI_NATIVE_LIBRARY: ${{ github.workspace }}/native-install/${{ matrix.installed_library }}
+        run: >-
+          dotnet test tests/CsWebUi.Tests/CsWebUi.Tests.csproj
+          --configuration Release
+          --filter "FullyQualifiedName~WebUiNativeSmokeTests|FullyQualifiedName~WebUiWindowSmokeTests|FullyQualifiedName~WebUiFileHandlerTests"
 
       - name: Configure static Windows library
         if: matrix.rid == 'win-x64'
@@ -193,7 +206,25 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: webui-official-native
-          path: artifacts
+          path: |
+            artifacts/native
+            artifacts/native-static
+            artifacts/include
+            artifacts/webui-nightly-assets.json
+            artifacts/webui-nightly-release.json
+            artifacts/webui-nightly-commit.txt
+          if-no-files-found: error
+
+      - name: Retain exact official archives and provenance
+        uses: actions/upload-artifact@v7
+        with:
+          name: webui-official-archives
+          path: |
+            artifacts/official-archives
+            artifacts/include
+            artifacts/webui-nightly-assets.json
+            artifacts/webui-nightly-release.json
+            artifacts/webui-nightly-commit.txt
           if-no-files-found: error
 
   package:

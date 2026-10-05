@@ -42,7 +42,8 @@ if [[ "$release_commit" != "$expected_commit" ]]; then
   exit 1
 fi
 
-mkdir -p "$output_root/native" "$output_root/native-static/win-x64" "$output_root/include"
+archives_root="$output_root/official-archives/$expected_commit"
+mkdir -p "$output_root/native" "$output_root/native-static/win-x64" "$output_root/include" "$archives_root"
 canonical_header="$output_root/include/webui.h"
 
 while IFS= read -r asset; do
@@ -65,6 +66,9 @@ while IFS= read -r asset; do
   echo "Downloading official WebUI $rid asset ($name)..."
   curl -fsSL "$download_url" -o "$archive"
   echo "$expected_sha256  $archive" | sha256sum --check --status
+  # Preserve the exact verified upstream bytes; extraction cannot reproduce
+  # the official archive digest after a mutable nightly asset disappears.
+  cp "$archive" "$archives_root/$name"
   unzip -q "$archive" -d "$temporary_root"
 
   header="$extracted/include/webui.h"
@@ -101,5 +105,6 @@ fi
 
 bash "$repository_root/eng/validate-webui-abi.sh" "$canonical_header"
 cp "$manifest" "$output_root/webui-nightly-assets.json"
+cp "$release_json" "$output_root/webui-nightly-release.json"
 printf '%s\n' "$release_commit" > "$output_root/webui-nightly-commit.txt"
 echo "Bootstrapped verified official WebUI $expected_version assets from $release_commit."
