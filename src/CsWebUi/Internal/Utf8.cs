@@ -17,6 +17,7 @@ internal static unsafe class Utf8
         var byteCount = Encoding.UTF8.GetByteCount(value);
         var bytes = GC.AllocateUninitializedArray<byte>(checked(byteCount + 1));
         Encoding.UTF8.GetBytes(value, bytes);
+        bytes[byteCount] = 0;
         return bytes;
     }
 
