@@ -44,7 +44,8 @@ raw-data helpers, and safe synchronous or `ValueTask`-based callbacks.
 - Trimming and NativeAOT-oriented, including optional static linking on
   Windows x64.
 - Policy-free custom HTTP responses for asset and framework integrations.
-- Official WebUI native binaries, pinned and verified during packaging.
+- Official WebUI native binaries, pinned and verified during packaging; macOS
+  libraries are built from the same official revision for macOS 15 and later.
 
 ## Installation
 
@@ -205,6 +206,15 @@ native libraries can enter a NuGet package. The same official repository and
 revision must be pinned in `flake.lock`; CI rejects any mismatch before a
 separate required matrix builds that source on every supported platform and
 runs its native lifecycle regression.
+
+The official macOS archives are built without a deployment target and require
+the newest macOS. Release packages therefore replace them with `osx-x64` and
+`osx-arm64` libraries that CI builds from the same pinned official revision
+using upstream's `GNUmakefile` release recipe with a macOS 15.0 deployment
+target, the oldest macOS supported by .NET 10. Their digests, recipe and
+workflow run are recorded under `provenance/WebUI/` in `CsWebUi.Native`, and
+`eng/check-macos-minos.mjs` fails packaging if any shipped Mach-O slice records
+a minimum macOS (`LC_BUILD_VERSION` minos) above 15.0.
 
 Maintainers can reproduce the verified official-asset bootstrap locally:
 

@@ -12,6 +12,9 @@ permissions:
 
 env:
   WEBVIEW2_SDK_VERSION: 1.0.4078.44
+  # Oldest macOS release supported by .NET 10. Every shipped dylib must record
+  # this minimum (LC_BUILD_VERSION minos) or older.
+  MACOS_DEPLOYMENT_TARGET: "15.0"
 
 concurrency:
   group: native-${{ github.workflow }}-${{ github.ref }}
@@ -85,7 +88,7 @@ jobs:
           - os: macos-15-intel
             rid: osx-x64
             installed_library: lib/libwebui-2.dylib
-          - os: macos-14
+          - os: macos-15
             rid: osx-arm64
             installed_library: lib/libwebui-2.dylib
     steps:
@@ -106,6 +109,7 @@ jobs:
           -DWEBUI_OUT_LIB_NAME=webui-2
           -DWEBUI_USE_TLS=OFF
           -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=${{ env.MACOS_DEPLOYMENT_TARGET }}
 
       - name: Build shared library
         run: cmake --build native-build --config Release --parallel
@@ -124,6 +128,65 @@ jobs:
           dotnet test tests/CsWebUi.Tests/CsWebUi.Tests.csproj
           --configuration Release
           --filter "FullyQualifiedName~WebUiNativeSmokeTests|FullyQualifiedName~WebUiWindowSmokeTests|FullyQualifiedName~WebUiFileHandlerTests"
+
+      # The official macOS nightly archives are built on the newest runner
+      # image without a deployment target, so they require the newest macOS.
+      # Package macOS dylibs built from the same pinned official commit with
+      # upstream's own release recipe instead, targeting the .NET 10 floor.
+      - name: Build packaged macOS library with the upstream release recipe
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          MACOSX_DEPLOYMENT_TARGET: ${{ env.MACOS_DEPLOYMENT_TARGET }}
+        run: |
+          set -euo pipefail
+          case "${{ matrix.rid }}" in
+            osx-arm64) arch=arm64 ;;
+            osx-x64) arch=x86_64 ;;
+            *) echo "Unexpected macOS RID '${{ matrix.rid }}'." >&2; exit 1 ;;
+          esac
+
+          xcrun --show-sdk-version
+          clang --version
+          # Overriding TARGET pins the triple's deployment target explicitly.
+          # Building against this runner's SDK fails if WebKit or AppKit usage
+          # needs an SDK newer than the image provides; unguarded use of APIs
+          # newer than the deployment target is an error.
+          make -C .upstream/webui release \
+            TARGET="-target ${arch}-apple-macos${MACOSX_DEPLOYMENT_TARGET} -arch ${arch} -Werror=unguarded-availability-new"
+
+          mkdir -p "macos-native/${{ matrix.rid }}"
+          cp .upstream/webui/dist/libwebui-2.dylib "macos-native/${{ matrix.rid }}/libwebui-2.dylib"
+
+      - name: Verify macOS minimum OS with vtool
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for library in native-install/${{ matrix.installed_library }} "macos-native/${{ matrix.rid }}/libwebui-2.dylib"; do
+            echo "== $library"
+            vtool -show-build "$library"
+            otool -L "$library"
+          done
+          node eng/check-macos-minos.mjs --max "$MACOS_DEPLOYMENT_TARGET" \
+            native-install/${{ matrix.installed_library }} "macos-native/${{ matrix.rid }}/libwebui-2.dylib"
+
+      - name: Run native lifecycle regression against the packaged macOS library
+        if: runner.os == 'macOS'
+        env:
+          CSWEBUI_NATIVE_LIBRARY: ${{ github.workspace }}/macos-native/${{ matrix.rid }}/libwebui-2.dylib
+        run: >-
+          dotnet test tests/CsWebUi.Tests/CsWebUi.Tests.csproj
+          --configuration Release
+          --filter "FullyQualifiedName~WebUiNativeSmokeTests|FullyQualifiedName~WebUiWindowSmokeTests|FullyQualifiedName~WebUiFileHandlerTests"
+
+      - name: Upload packaged macOS library
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: webui-macos-native-${{ matrix.rid }}
+          path: macos-native
+          if-no-files-found: error
 
       - name: Configure static Windows library
         if: matrix.rid == 'win-x64'
@@ -229,7 +292,7 @@ jobs:
 
   package:
     name: Pack NuGet runtime assets
-    needs: [build, official-assets]
+    needs: [prepare, build, official-assets]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -240,6 +303,45 @@ jobs:
         with:
           name: webui-official-native
           path: artifacts
+
+      - name: Download macOS libraries built for the supported floor
+        uses: actions/download-artifact@v8
+        with:
+          pattern: webui-macos-native-*
+          path: macos-native
+          merge-multiple: true
+
+      - name: Replace official macOS libraries and record provenance
+        shell: bash
+        env:
+          WEBUI_REPOSITORY: ${{ needs.prepare.outputs.repository }}
+          WEBUI_REVISION: ${{ needs.prepare.outputs.revision }}
+        run: |
+          set -euo pipefail
+          entries=()
+          for rid in osx-arm64 osx-x64; do
+            library="macos-native/$rid/libwebui-2.dylib"
+            if [[ ! -f "$library" ]]; then
+              echo "Missing source-built $rid WebUI library." >&2
+              exit 1
+            fi
+            cp "$library" "artifacts/native/$rid/libwebui-2.dylib"
+            sha256=$(sha256sum "$library" | cut -d' ' -f1)
+            entries+=("$(jq -n --arg rid "$rid" --arg sha256 "$sha256" '{rid: $rid, library: "libwebui-2.dylib", sha256: $sha256}')")
+          done
+
+          mkdir -p artifacts/native-provenance
+          printf '%s\n' "${entries[@]}" | jq -s \
+            --arg repository "$WEBUI_REPOSITORY" \
+            --arg commit "$WEBUI_REVISION" \
+            --arg deploymentTarget "$MACOS_DEPLOYMENT_TARGET" \
+            --arg run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{repository: $repository, commit: $commit, recipe: "GNUmakefile release", deploymentTarget: $deploymentTarget, workflowRun: $run, assets: .}' \
+            > artifacts/native-provenance/webui-macos-source-build.json
+          cat artifacts/native-provenance/webui-macos-source-build.json
+
+      - name: Check macOS minimum OS of native inputs
+        run: node eng/check-macos-minos.mjs --max "$MACOS_DEPLOYMENT_TARGET" artifacts/native
 
       - uses: actions/setup-dotnet@v6
         with:
@@ -266,7 +368,23 @@ jobs:
           --configuration Release --no-restore --output artifacts/packages
           -p:NativeAssetsRoot=${{ github.workspace }}/artifacts/native
           -p:StaticNativeAssetsRoot=${{ github.workspace }}/artifacts/native-static
+          -p:NativeProvenanceRoot=${{ github.workspace }}/artifacts/native-provenance
           -p:RequireNativeAssets=true
+
+      - name: Check macOS minimum OS of packaged dylibs
+        shell: bash
+        run: |
+          set -euo pipefail
+          package=$(find artifacts/packages -name 'CsWebUi.Native.*.nupkg' ! -name '*.snupkg' -print -quit)
+          if [[ -z "$package" ]]; then
+            echo "CsWebUi.Native package was not produced." >&2
+            exit 1
+          fi
+          extracted="$RUNNER_TEMP/cswebui-native-package"
+          rm -rf "$extracted"
+          unzip -q "$package" 'runtimes/osx-*/native/*' -d "$extracted"
+          node eng/check-macos-minos.mjs --max "$MACOS_DEPLOYMENT_TARGET" "$extracted/runtimes"
+          unzip -l "$package" provenance/WebUI/webui-macos-source-build.json
 
       - name: Pack high-level package
         run: >-
@@ -306,7 +424,7 @@ jobs:
             rid: osx-x64
             native_library: libwebui-2.dylib
             executable: CsWebUi.StaticPackageSmoke
-          - os: macos-14
+          - os: macos-15
             rid: osx-arm64
             native_library: libwebui-2.dylib
             executable: CsWebUi.StaticPackageSmoke
@@ -359,6 +477,15 @@ jobs:
           fi
 
           "$output/${{ matrix.executable }}"
+
+      - name: Verify packaged macOS minimum OS with vtool
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          library="artifacts/dynamic-package-smoke/${{ matrix.native_library }}"
+          vtool -show-build "$library"
+          node eng/check-macos-minos.mjs --max "$MACOS_DEPLOYMENT_TARGET" "$library"
 
       - name: Verify official Windows DLL dependencies
         if: matrix.rid == 'win-x64'

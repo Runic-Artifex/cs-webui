@@ -13,8 +13,9 @@ dotnet add package CsWebUi.Native --prerelease
 
 `CsWebUi.Native` targets .NET 10 and is currently a prerelease package
 following the WebUI 2.5 beta ABI. Release packages include verified official
-WebUI native libraries for `win-x64`, `linux-x64`, `linux-arm64`, `osx-x64`,
-and `osx-arm64`.
+WebUI native libraries for `win-x64`, `linux-x64` and `linux-arm64`, and
+`osx-x64` and `osx-arm64` libraries built from the same official WebUI
+revision for macOS 15 and later.
 
 Browser mode needs a supported installed browser. Embedded-WebView mode needs
 WebView2 on Windows, WebKitGTK on Linux, or WebKit on macOS. Your project must

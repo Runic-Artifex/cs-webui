@@ -42,7 +42,12 @@ To adopt a newer nightly deliberately:
      dotnet test CsWebUi.sln --configuration Release
    ```
 
-The NuGet workflow packages only the bootstrapped official archives. Its
+The NuGet workflow packages the bootstrapped official archives for Windows and
+Linux. For `osx-x64` and `osx-arm64` it packages libraries built on macOS 15
+runners from the same pinned revision with upstream's `GNUmakefile` release
+recipe and `MACOS_DEPLOYMENT_TARGET` (15.0) from `native.yml`; the official
+macOS archives require the newest macOS. `eng/check-macos-minos.mjs` must
+report every packaged macOS slice at minos 15.0 or older. Its
 separate source-build matrix, native lifecycle regression, and package-consumer
 server lifecycle must also succeed for the same official revision pinned in
 `flake.lock`.

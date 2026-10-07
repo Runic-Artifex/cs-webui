@@ -1,8 +1,7 @@
 CS-WebUI is an independent .NET binding for WebUI.
 
-Bundled native assets are official WebUI nightly builds published by
-webui-dev/webui, Copyright (c) 2020-2026 Hassan Draga and contributors,
-distributed under the MIT License:
+Bundled native assets are built from webui-dev/webui, Copyright (c) 2020-2026
+Hassan Draga and contributors, distributed under the MIT License:
 https://github.com/webui-dev/webui
 
 The complete upstream license is retained in this repository at
@@ -19,8 +18,13 @@ NuGet packages under licenses/WebUI-Logo/.
 
 The exact official upstream nightly revision and archive digests are recorded
 in eng/webui-nightly-assets.json. Source-build and lifecycle verification use
-that same webui-dev/webui revision pinned in flake.lock. Published packages
-contain only the verified official archives selected by the manifest.
+that same webui-dev/webui revision pinned in flake.lock. Published Windows and
+Linux libraries are the verified official archives selected by the manifest.
+Published macOS libraries are built by CS-WebUI CI from that same official
+revision with upstream's GNUmakefile release recipe and a macOS 15.0
+deployment target, because the official macOS archives require the newest
+macOS. Their digests and build run are recorded in the package under
+provenance/WebUI/webui-macos-source-build.json.
 
 The optional statically linked Windows build includes WebView2LoaderStatic.lib
 from the Microsoft.Web.WebView2 SDK, version 1.0.4078.44. Its license and

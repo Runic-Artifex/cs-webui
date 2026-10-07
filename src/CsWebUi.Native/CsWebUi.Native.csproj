@@ -13,6 +13,7 @@
     <PackageTags>runic-artifex;webui;native;interop;aot</PackageTags>
     <NativeAssetsRoot Condition="'$(NativeAssetsRoot)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\native</NativeAssetsRoot>
     <StaticNativeAssetsRoot Condition="'$(StaticNativeAssetsRoot)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\native-static</StaticNativeAssetsRoot>
+    <NativeProvenanceRoot Condition="'$(NativeProvenanceRoot)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\native-provenance</NativeProvenanceRoot>
   </PropertyGroup>
 
   <ItemGroup>
@@ -35,6 +36,11 @@
     <None Include="$(NativeAssetsRoot)\osx-arm64\libwebui-2.dylib" Pack="true" PackagePath="runtimes/osx-arm64/native/" Condition="Exists('$(NativeAssetsRoot)\osx-arm64\libwebui-2.dylib')" />
   </ItemGroup>
 
+  <ItemGroup Condition="Exists('$(NativeProvenanceRoot)\webui-macos-source-build.json')">
+    <!-- macOS dylibs are built from the pinned official commit for the .NET 10 macOS floor. -->
+    <None Include="$(NativeProvenanceRoot)\webui-macos-source-build.json" Pack="true" PackagePath="provenance/WebUI/" />
+  </ItemGroup>
+
   <ItemGroup Condition="Exists('$(StaticNativeAssetsRoot)')">
     <!-- Static archives use a private package path so NuGet does not copy them to application output. -->
     <None Include="$(StaticNativeAssetsRoot)\win-x64\webui-2.lib" Pack="true" PackagePath="buildTransitive/native/win-x64/" Condition="Exists('$(StaticNativeAssetsRoot)\win-x64\webui-2.lib')" />
@@ -47,6 +53,7 @@
     <Error Condition="!Exists('$(NativeAssetsRoot)\linux-arm64\libwebui-2.so')" Text="Missing linux-arm64 WebUI native asset under $(NativeAssetsRoot)." />
     <Error Condition="!Exists('$(NativeAssetsRoot)\osx-x64\libwebui-2.dylib')" Text="Missing osx-x64 WebUI native asset under $(NativeAssetsRoot)." />
     <Error Condition="!Exists('$(NativeAssetsRoot)\osx-arm64\libwebui-2.dylib')" Text="Missing osx-arm64 WebUI native asset under $(NativeAssetsRoot)." />
+    <Error Condition="!Exists('$(NativeProvenanceRoot)\webui-macos-source-build.json')" Text="Missing macOS source-build provenance under $(NativeProvenanceRoot)." />
     <Error Condition="!Exists('$(StaticNativeAssetsRoot)\win-x64\webui-2.lib')" Text="Missing win-x64 static WebUI asset under $(StaticNativeAssetsRoot)." />
     <Error Condition="!Exists('$(StaticNativeAssetsRoot)\win-x64\WebView2LoaderStatic.lib')" Text="Missing win-x64 static WebView2 loader asset under $(StaticNativeAssetsRoot)." />
   </Target>
