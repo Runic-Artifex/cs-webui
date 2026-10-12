@@ -210,8 +210,12 @@ public sealed unsafe class WebUiWindow : IDisposable
     }
 
     /// <summary>Starts the local WebUI server without launching a browser.</summary>
-    /// <returns>The URL of the started server.</returns>
-    /// <exception cref="WebUiException">The native runtime could not start the server.</exception>
+    /// <returns>The absolute URL of the started server.</returns>
+    /// <exception cref="WebUiException">
+    /// The native runtime could not start the server. WebUI reports this by returning an empty URL,
+    /// for example when the window's server did not start listening in time. The failed call can
+    /// be retried; WebUI then selects a new port.
+    /// </exception>
     public string StartServer(string content)
     {
         ThrowIfDisposed();
@@ -219,8 +223,28 @@ public sealed unsafe class WebUiWindow : IDisposable
         fixed (byte* value = bytes)
         {
             var result = Utf8.Decode(WebUiNative.StartServer(_id, value));
-            return result ?? throw WebUiApplication.CreateNativeException();
+            return RequireServerUrl(result, _id, WebUiApplication.ReadNativeError);
         }
+    }
+
+    internal static string RequireServerUrl(
+        string? url,
+        nuint windowId,
+        Func<(nuint ErrorNumber, string? Message)> readNativeError)
+    {
+        if (!string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url, UriKind.Absolute, out _))
+        {
+            return url;
+        }
+
+        var (errorNumber, nativeMessage) = readNativeError();
+        var returned = string.IsNullOrWhiteSpace(url) ? "an empty URL" : $"the invalid URL '{url}'";
+        var detail = string.IsNullOrWhiteSpace(nativeMessage)
+            ? $"WebUI reported no error details (error {errorNumber})."
+            : $"WebUI error {errorNumber}: {nativeMessage}";
+        throw new WebUiException(
+            errorNumber,
+            $"WebUI could not start the server for window {windowId}; the native call returned {returned}. {detail}");
     }
 
     /// <summary>Closes the visible window but retains its native object and bindings.</summary>
