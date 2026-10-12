@@ -124,11 +124,14 @@ public static class WebUiApplication
     internal static bool AsynchronousResponsesEnabled
         => Volatile.Read(ref _asynchronousResponsesEnabled) != 0;
 
-    internal static unsafe WebUiException CreateNativeException()
+    internal static WebUiException CreateNativeException()
     {
-        var errorNumber = WebUiNative.GetLastErrorNumber();
-        return new WebUiException(errorNumber, Utf8.Decode(WebUiNative.GetLastErrorMessage()));
+        var (errorNumber, message) = ReadNativeError();
+        return new WebUiException(errorNumber, message);
     }
+
+    internal static unsafe (nuint ErrorNumber, string? Message) ReadNativeError()
+        => (WebUiNative.GetLastErrorNumber(), Utf8.Decode(WebUiNative.GetLastErrorMessage()));
 
     internal static void ReportUnhandledCallbackException(Exception exception, WebUiWindow window, WebUiEvent? webUiEvent)
     {
