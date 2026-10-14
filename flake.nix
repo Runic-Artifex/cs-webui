@@ -113,7 +113,8 @@
               export CSWEBUI_NATIVE_LIBRARY="${webuiNative}/lib/${nativeLibraryName}"
               ${lib.optionalString isLinux ''
                 export LD_LIBRARY_PATH="${linuxLibraryPath}:$LD_LIBRARY_PATH"
-                export WEBUI_BROWSER_PATH="${pkgs.chromium}/bin/chromium"
+                # Read by CS-WebUI's WebUiWindow.Show; WebUI itself reads no browser variable.
+                export CSWEBUI_BROWSER_PATH="${pkgs.chromium}/bin/chromium"
               ''}
             '';
           };

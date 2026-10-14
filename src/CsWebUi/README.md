@@ -18,7 +18,10 @@ packages include verified official WebUI native libraries for `win-x64`,
 
 Browser mode needs a supported installed browser. Embedded-WebView mode needs
 the platform runtime: WebView2 on Windows, WebKitGTK on Linux, or WebKit on
-macOS.
+macOS. To choose the browser executable, set `CSWEBUI_BROWSER_PATH` or call
+`WebUiApplication.SetBrowserPath`; WebUI itself reads no browser environment
+variable. When a window cannot be shown, `WebUiShowException` names the browser
+that was tried and why it failed.
 
 ## First window
 
@@ -41,7 +44,9 @@ WebUiApplication.Wait();
 
 `WebUiWindow.Dispose()` destroys the native window after active managed
 callbacks finish. Use `BindAsync` when a JavaScript call needs an asynchronous
-`ValueTask<WebUiResult>` response.
+`ValueTask<WebUiResult>` response. After `WebUiApplication.Exit()` or `Clean()`,
+WebUI no longer waits for pending asynchronous replies, and CS-WebUI discards
+any that complete later.
 
 ## Choose this package
 

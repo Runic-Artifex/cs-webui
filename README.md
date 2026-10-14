@@ -82,6 +82,17 @@ destruction until active managed callbacks finish. Async bindings
 automatically opt WebUI into its asynchronous-response mode; return a
 `WebUiResult` to resolve the JavaScript promise.
 
+`WebUiApplication.Exit()` and `WebUiApplication.Clean()` make WebUI stop
+waiting for replies that async bindings have not sent yet; WebUI answers those
+calls with an empty result and releases their events. CS-WebUI discards a reply
+that completes after that point instead of writing it into the released event,
+so shutting down with calls still pending is safe. Use `WebUiApplication.Exit`
+rather than the raw `WebUiNative.Exit`, which bypasses this protection.
+
+`StartServer` asks the operating system for a free port unless `SetPort` chose
+one, and retries a few times with a new port if listening fails, so hosts
+started at the same moment do not collide on WebUI's own port choice.
+
 The comparative stress adapter serves real HTTP traffic and then exits through
 normal managed disposal. The package smoke repeats that server-only lifecycle
 without launching a browser on every supported runtime in CI.
@@ -110,6 +121,45 @@ without launching a browser on every supported runtime in CI.
 
 Browser discovery and support are provided by WebUI. Embedded mode requires
 the platform WebView runtime; browser mode needs a supported installed browser.
+
+## Choosing the browser
+
+`WebUiWindow.Show` lets WebUI choose: a supported browser that is already
+running, otherwise the first installed one of Chrome, Edge, Chromium, Epic,
+Vivaldi, Brave, Firefox and Yandex (on Windows Chromium comes last), then the
+system's default browser, then the embedded WebView. On Linux WebUI finds a
+browser by running its command name, such as `google-chrome` or `chromium`,
+through the shell, so `PATH` decides; on Windows it reads the registry's
+`App Paths`; on macOS it asks Launch Services.
+
+To choose one browser executable, set `CSWEBUI_BROWSER_PATH` or call
+`WebUiApplication.SetBrowserPath` before showing a window:
+
+```bash
+CSWEBUI_BROWSER_PATH=/usr/bin/chromium dotnet run
+```
+
+WebUI has no option for an executable path, so CS-WebUI points WebUI's browser
+folder at the file's directory and shows the window in that browser kind, with
+no fallback. The file name must be one WebUI knows, such as `chromium`,
+`google-chrome`, `firefox` or `microsoft-edge-stable` on Linux, `chrome.exe` or
+`msedge.exe` on Windows, and `Chromium.app` on macOS; a wrapper script with such
+a name can add flags. WebUI itself reads no browser environment variable,
+including `WEBUI_BROWSER_PATH`. `WebUiWindow.ShowInBrowser` selects a browser
+kind, and `WebUiApplication.SetBrowserFolder` adds a folder that WebUI searches
+first while keeping its own order.
+
+When a window cannot be shown, `Show`, `ShowInBrowser` and `ShowWebView` throw
+`WebUiShowException`. It names the browser WebUI tried, the executable it most
+likely used, and whether the browser was not found, could not be started, or
+started but did not connect within the connection timeout (15 seconds unless
+`WebUiApplication.SetConnectionTimeout` sets another). WebUI starts browsers
+detached and discards their output, so the browser's own exit code and errors
+are not available; run the browser with the window's URL to see them.
+
+On Linux, WebUI loads GTK when it creates any window if GTK 3 and WebKitGTK 4.1
+are installed, and GTK ends the process when no display can be opened. Give
+headless processes a virtual display, for example with `xvfb-run`.
 
 ## Custom file responses
 

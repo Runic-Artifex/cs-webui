@@ -1,4 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -10,6 +13,9 @@ namespace CsWebUi;
 /// <summary>Owns a native WebUI window and its managed callback bindings.</summary>
 public sealed unsafe class WebUiWindow : IDisposable
 {
+    // StartServer selects a free port itself and retries this often when listening fails (#18).
+    private const int StartServerAttempts = 4;
+
     private static readonly ConcurrentDictionary<nuint, WebUiWindow> Windows = new();
     private static readonly byte[] FileHandlerFailureResponse = Encoding.ASCII.GetBytes(
         "HTTP/1.1 500 Internal Server Error\r\n" +
@@ -30,6 +36,8 @@ public sealed unsafe class WebUiWindow : IDisposable
     private readonly int _generation = WebUiNativeLifetime.Generation;
     private FileHandlerRegistration? _fileHandler;
     private int _callbacksInFlight;
+    private int _customPort;
+    private int _serverRequested;
     private int _disposeRequested;
     private int _shutdownCancelled;
     private int _destroyed;
@@ -152,33 +160,48 @@ public sealed unsafe class WebUiWindow : IDisposable
     }
 
     /// <summary>Shows HTML content, a local file, or a URL using WebUI's recommended browser.</summary>
-    /// <exception cref="WebUiException">The native runtime could not show the window.</exception>
+    /// <remarks>
+    /// WebUI tries its preferred installed browser, then the system's default browser, then the
+    /// embedded WebView. A browser selected with <see cref="WebUiApplication.SetBrowserPath"/> or
+    /// <c>CSWEBUI_BROWSER_PATH</c> is used instead, without fallback.
+    /// </remarks>
+    /// <exception cref="WebUiShowException">
+    /// WebUI could not show the window. The exception names the browser WebUI tried, where it was
+    /// found, and whether it was missing, could not be started, or did not connect in time.
+    /// </exception>
     public void Show(string content)
     {
-        if (!TryShow(content))
+        ThrowIfDisposed();
+        var configured = WebUiApplication.ApplyConfiguredBrowser();
+        var requested = configured?.Browser ?? WebUiBrowser.AnyBrowser;
+        var started = Stopwatch.GetTimestamp();
+        var shown = configured is null ? ShowNative(content) : ShowInBrowserNative(content, requested);
+        if (!shown)
         {
-            throw WebUiApplication.CreateNativeException();
+            throw CreateShowException(requested, Stopwatch.GetElapsedTime(started), configured?.Path);
         }
     }
 
     /// <summary>Attempts to show HTML content, a local file, or a URL using WebUI's recommended browser.</summary>
+    /// <remarks>Honors <see cref="WebUiApplication.SetBrowserPath"/> and <c>CSWEBUI_BROWSER_PATH</c> like <see cref="Show"/>.</remarks>
     public bool TryShow(string content)
     {
         ThrowIfDisposed();
-        var bytes = Utf8.Encode(content, nameof(content));
-        fixed (byte* value = bytes)
-        {
-            return WebUiNative.Show(_id, value) != 0;
-        }
+        var configured = WebUiApplication.ApplyConfiguredBrowser();
+        return configured is null ? ShowNative(content) : ShowInBrowserNative(content, configured.Browser);
     }
 
     /// <summary>Shows HTML content, a local file, or a URL in a selected browser.</summary>
-    /// <exception cref="WebUiException">The native runtime could not show the window.</exception>
+    /// <exception cref="WebUiShowException">WebUI could not show the window in that browser.</exception>
     public void ShowInBrowser(string content, WebUiBrowser browser)
     {
-        if (!TryShowInBrowser(content, browser))
+        ThrowIfDisposed();
+        var configured = WebUiApplication.ApplyConfiguredBrowser();
+        var started = Stopwatch.GetTimestamp();
+        if (!ShowInBrowserNative(content, browser))
         {
-            throw WebUiApplication.CreateNativeException();
+            var path = configured is not null && configured.Browser == browser ? configured.Path : null;
+            throw CreateShowException(browser, Stopwatch.GetElapsedTime(started), path);
         }
     }
 
@@ -186,20 +209,19 @@ public sealed unsafe class WebUiWindow : IDisposable
     public bool TryShowInBrowser(string content, WebUiBrowser browser)
     {
         ThrowIfDisposed();
-        var bytes = Utf8.Encode(content, nameof(content));
-        fixed (byte* value = bytes)
-        {
-            return WebUiNative.ShowBrowser(_id, value, (nuint)browser) != 0;
-        }
+        WebUiApplication.ApplyConfiguredBrowser();
+        return ShowInBrowserNative(content, browser);
     }
 
     /// <summary>Shows HTML content, a local file, or a URL in an embedded WebView.</summary>
-    /// <exception cref="WebUiException">The native runtime could not show the window.</exception>
+    /// <exception cref="WebUiShowException">The native runtime could not show the WebView.</exception>
     public void ShowWebView(string content)
     {
+        ThrowIfDisposed();
+        var started = Stopwatch.GetTimestamp();
         if (!TryShowWebView(content))
         {
-            throw WebUiApplication.CreateNativeException();
+            throw CreateShowException(WebUiBrowser.WebView, Stopwatch.GetElapsedTime(started), null);
         }
     }
 
@@ -208,14 +230,135 @@ public sealed unsafe class WebUiWindow : IDisposable
     {
         ThrowIfDisposed();
         var bytes = Utf8.Encode(content, nameof(content));
+        Volatile.Write(ref _serverRequested, 1);
         fixed (byte* value = bytes)
         {
             return WebUiNative.ShowWebView(_id, value) != 0;
         }
     }
 
+    private bool ShowNative(string content)
+    {
+        var bytes = Utf8.Encode(content, nameof(content));
+        Volatile.Write(ref _serverRequested, 1);
+        fixed (byte* value = bytes)
+        {
+            return WebUiNative.Show(_id, value) != 0;
+        }
+    }
+
+    private bool ShowInBrowserNative(string content, WebUiBrowser browser)
+    {
+        var bytes = Utf8.Encode(content, nameof(content));
+        Volatile.Write(ref _serverRequested, 1);
+        fixed (byte* value = bytes)
+        {
+            return WebUiNative.ShowBrowser(_id, value, (nuint)browser) != 0;
+        }
+    }
+
+    private WebUiShowException CreateShowException(WebUiBrowser requested, TimeSpan elapsed, string? configuredPath)
+    {
+        var tried = requested;
+        if (requested == WebUiBrowser.AnyBrowser)
+        {
+            // The same choice WebUI made: a running browser first, then its preference order.
+            tried = (WebUiBrowser)(uint)WebUiNative.GetBestBrowser(_id);
+        }
+
+        var path = configuredPath;
+        if (path is null && tried is not (WebUiBrowser.AnyBrowser or WebUiBrowser.ChromiumBased or WebUiBrowser.WebView))
+        {
+            path = WebUiBrowserLocator.Find(tried, WebUiApplication.BrowserFolder);
+        }
+
+        return BuildShowException(_id, requested, tried, path, elapsed, WebUiApplication.ShowConnectionTimeout, HasDisplay());
+    }
+
+    internal static WebUiShowException BuildShowException(
+        nuint windowId,
+        WebUiBrowser requested,
+        WebUiBrowser tried,
+        string? browserPath,
+        TimeSpan elapsed,
+        TimeSpan connectionTimeout,
+        bool hasDisplay)
+    {
+        var invariant = System.Globalization.CultureInfo.InvariantCulture;
+        var message = new StringBuilder(string.Create(invariant, $"WebUI could not show window {windowId}: "));
+        WebUiShowFailure failure;
+        if (tried == WebUiBrowser.WebView)
+        {
+            failure = WebUiShowFailure.WebViewNotStarted;
+            message.Append("the embedded WebView could not be started. It needs ")
+                .Append(OperatingSystem.IsWindows() ? "the Microsoft Edge WebView2 Runtime"
+                    : OperatingSystem.IsMacOS() ? "WKWebView"
+                    : "GTK 3, WebKitGTK 4.1 and a display")
+                .Append('.');
+        }
+        else if (tried is WebUiBrowser.AnyBrowser)
+        {
+            failure = WebUiShowFailure.BrowserNotFound;
+            message.Append("it found no supported browser (Chrome, Edge, Chromium, Epic, Vivaldi, Brave, Firefox or Yandex)");
+            if (requested == WebUiBrowser.AnyBrowser)
+            {
+                message.Append(", and the embedded WebView could not be started instead");
+            }
+
+            message.Append('.');
+        }
+        else
+        {
+            var name = WebUiBrowserLocator.DisplayName(tried);
+            var where = browserPath is null ? string.Empty : $" ({browserPath})";
+            if (elapsed >= connectionTimeout - TimeSpan.FromSeconds(1))
+            {
+                failure = WebUiShowFailure.NotConnected;
+                message.Append(invariant, $"it started {name}{where}, but the page did not connect within {connectionTimeout.TotalSeconds:0} s.");
+            }
+            else
+            {
+                failure = WebUiShowFailure.BrowserNotStarted;
+                message.Append(invariant, $"it could not start {name}{where}");
+                message.Append(requested == WebUiBrowser.AnyBrowser
+                    ? ", the system's default browser, or the embedded WebView."
+                    : ".");
+            }
+
+            message.Append(" WebUI starts browsers detached and discards their output, so the browser's exit code and errors are not available; run it with the window's URL to see why it fails.");
+        }
+
+        if (!hasDisplay)
+        {
+            message.Append(" No display is available: DISPLAY and WAYLAND_DISPLAY are not set.");
+        }
+
+        if (tried != WebUiBrowser.WebView)
+        {
+            message.Append(invariant, $" Choose the browser with {WebUiApplication.BrowserPathEnvironmentVariable}, WebUiApplication.SetBrowserPath or WebUiWindow.ShowInBrowser.");
+        }
+
+        return new WebUiShowException(
+            message.ToString(),
+            failure,
+            tried,
+            browserPath,
+            failure == WebUiShowFailure.NotConnected ? connectionTimeout : null);
+    }
+
+    private static bool HasDisplay()
+        => !OperatingSystem.IsLinux() && !OperatingSystem.IsFreeBSD()
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"));
+
     /// <summary>Starts the local WebUI server without launching a browser.</summary>
     /// <returns>The absolute URL of the started server.</returns>
+    /// <remarks>
+    /// Unless <see cref="SetPort"/> chose a port, the first start takes a free port from the
+    /// operating system and retries a few times with a new one when listening fails. WebUI's own
+    /// choice repeats across processes started in the same second, so concurrent hosts collided.
+    /// WebUI also resets <see cref="WebUiApplication.SetConnectionTimeout"/> to zero here.
+    /// </remarks>
     /// <exception cref="WebUiException">
     /// The native runtime could not start the server. WebUI reports this by returning an empty URL,
     /// for example when the window's server did not start listening in time. The failed call can
@@ -225,21 +368,64 @@ public sealed unsafe class WebUiWindow : IDisposable
     {
         ThrowIfDisposed();
         var bytes = Utf8.Encode(content, nameof(content));
-        fixed (byte* value = bytes)
+        for (var attempt = 1; ; attempt++)
         {
-            var result = Utf8.Decode(WebUiNative.StartServer(_id, value));
-            return RequireServerUrl(result, _id, WebUiApplication.ReadNativeError);
+            var selectedPort = Volatile.Read(ref _customPort) == 0
+                && Volatile.Read(ref _serverRequested) == 0
+                && TrySelectFreePort();
+            string? result;
+            fixed (byte* value = bytes)
+            {
+                result = Utf8.Decode(WebUiNative.StartServer(_id, value));
+            }
+
+            // webui_start_server() makes WebUI wait forever for connections.
+            WebUiApplication.ResetConnectionTimeoutMirror();
+            if (IsServerUrl(result))
+            {
+                Volatile.Write(ref _serverRequested, 1);
+                return result!;
+            }
+
+            if (!selectedPort || attempt == StartServerAttempts)
+            {
+                return RequireServerUrl(result, _id, WebUiApplication.ReadNativeError);
+            }
         }
     }
+
+    private bool TrySelectFreePort()
+    {
+        // WebUI draws ports from rand() seeded with the current second, so processes started in
+        // the same second try the same ports and all but one fail to listen (#18). The operating
+        // system hands out a distinct free port instead.
+        int port;
+        try
+        {
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            listener.Stop();
+        }
+        catch (SocketException)
+        {
+            return false;
+        }
+
+        return WebUiNative.SetPort(_id, (nuint)port) != 0;
+    }
+
+    private static bool IsServerUrl(string? url)
+        => !string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url, UriKind.Absolute, out _);
 
     internal static string RequireServerUrl(
         string? url,
         nuint windowId,
         Func<(nuint ErrorNumber, string? Message)> readNativeError)
     {
-        if (!string.IsNullOrWhiteSpace(url) && Uri.TryCreate(url, UriKind.Absolute, out _))
+        if (IsServerUrl(url))
         {
-            return url;
+            return url!;
         }
 
         var (errorNumber, nativeMessage) = readNativeError();
@@ -345,7 +531,13 @@ public sealed unsafe class WebUiWindow : IDisposable
     public bool TrySetPort(nuint port)
     {
         ThrowIfDisposed();
-        return WebUiNative.SetPort(_id, port) != 0;
+        if (WebUiNative.SetPort(_id, port) == 0)
+        {
+            return false;
+        }
+
+        Volatile.Write(ref _customPort, 1);
+        return true;
     }
 
     /// <summary>Sets whether the window runs in kiosk mode.</summary>
