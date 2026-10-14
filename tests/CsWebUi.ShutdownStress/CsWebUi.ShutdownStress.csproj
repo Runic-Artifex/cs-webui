@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>CsWebUi.Tests.Stress</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="../CsWebUi.Tests/Stress/*.cs" Link="Stress/%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/CsWebUi/CsWebUi.csproj" />
+    <ProjectReference Include="../../src/CsWebUi.Native/CsWebUi.Native.csproj" />
+  </ItemGroup>
+</Project>

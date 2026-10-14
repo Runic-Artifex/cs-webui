@@ -1,7 +1,7 @@
 namespace CsWebUi;
 
 /// <summary>Represents a failure reported by the native WebUI runtime.</summary>
-public sealed class WebUiException : InvalidOperationException
+public class WebUiException : InvalidOperationException
 {
     /// <summary>Initializes an exception from a native WebUI error.</summary>
     public WebUiException(nuint errorNumber, string? message = null)

@@ -6,19 +6,31 @@ namespace CsWebUi;
 /// <summary>Represents one native WebUI event while its managed callback is executing.</summary>
 /// <remarks>
 /// Argument access and client operations are valid only while the callback is active. An event
-/// passed to <see cref="WebUiWindow.BindAsync"/> stays active until its returned operation ends.
+/// passed to <see cref="WebUiWindow.BindAsync"/> stays active until its returned operation ends,
+/// unless <see cref="WebUiApplication.Exit"/> or <see cref="WebUiApplication.Clean"/> runs first:
+/// WebUI then stops waiting for the reply and releases the event, so its arguments and client can
+/// only be reached from the binding's synchronous part. Once a reply has been sent, WebUI frees the
+/// event shortly afterwards, so every later member that reaches the native event throws
+/// <see cref="InvalidOperationException"/>, on any thread.
 /// </remarks>
 public sealed unsafe class WebUiEvent
 {
     private readonly WebUiWindow _window;
     private readonly WebUiEventNative* _nativeEvent;
+    private readonly int _generation;
+    private readonly int _dispatchThreadId;
+    private int _dispatching = 1;
     private int _active = 1;
     private int _responded;
+    private int _abandoned;
+    private int _accessors;
 
     internal WebUiEvent(WebUiWindow window, WebUiEventNative* nativeEvent)
     {
         _window = window;
         _nativeEvent = nativeEvent;
+        _generation = WebUiNativeLifetime.Generation;
+        _dispatchThreadId = Environment.CurrentManagedThreadId;
 
         WindowId = nativeEvent->Window;
         EventType = (WebUiEventType)(uint)nativeEvent->EventType;
@@ -62,7 +74,7 @@ public sealed unsafe class WebUiEvent
     {
         get
         {
-            ThrowIfInactive();
+            using var scope = EnterNative();
             return WebUiNative.GetCount(_nativeEvent);
         }
     }
@@ -71,7 +83,7 @@ public sealed unsafe class WebUiEvent
     /// <exception cref="FormatException">The argument is not a JavaScript-compatible 64-bit integer.</exception>
     public long GetInt64(nuint index = 0)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         ValidateArgumentIndex(index);
         return WebUiArgumentParser.ParseInt64(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
     }
@@ -80,7 +92,7 @@ public sealed unsafe class WebUiEvent
     /// <exception cref="FormatException">The argument is not a JavaScript-compatible floating-point value.</exception>
     public double GetDouble(nuint index = 0)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         ValidateArgumentIndex(index);
         return WebUiArgumentParser.ParseDouble(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
     }
@@ -89,7 +101,7 @@ public sealed unsafe class WebUiEvent
     /// <exception cref="FormatException">The argument is not a JavaScript-compatible Boolean value.</exception>
     public bool GetBoolean(nuint index = 0)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         ValidateArgumentIndex(index);
         return WebUiArgumentParser.ParseBoolean(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
     }
@@ -97,7 +109,7 @@ public sealed unsafe class WebUiEvent
     /// <summary>Gets an argument as a UTF-8 string.</summary>
     public string GetString(nuint index = 0)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         ValidateArgumentIndex(index);
         return Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index));
     }
@@ -105,7 +117,7 @@ public sealed unsafe class WebUiEvent
     /// <summary>Copies an argument's raw bytes into managed memory.</summary>
     public byte[] GetBytes(nuint index = 0)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         ValidateArgumentIndex(index);
 
         var size = WebUiNative.GetSizeAt(_nativeEvent, index);
@@ -123,7 +135,7 @@ public sealed unsafe class WebUiEvent
     /// <summary>Sends JavaScript to only the client that raised this event.</summary>
     public void RunJavaScript(string script)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         var bytes = Utf8.Encode(script, nameof(script));
         fixed (byte* value = bytes)
         {
@@ -134,7 +146,7 @@ public sealed unsafe class WebUiEvent
     /// <summary>Navigates only the client that raised this event.</summary>
     public void Navigate(string url)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         var bytes = Utf8.Encode(url, nameof(url));
         fixed (byte* value = bytes)
         {
@@ -146,7 +158,7 @@ public sealed unsafe class WebUiEvent
     /// <exception cref="WebUiException">The native runtime could not show the content.</exception>
     public void Show(string content)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         var bytes = Utf8.Encode(content, nameof(content));
         fixed (byte* value = bytes)
         {
@@ -160,7 +172,7 @@ public sealed unsafe class WebUiEvent
     /// <summary>Sends raw bytes to only the client that raised this event.</summary>
     public void SendRaw(string function, ReadOnlySpan<byte> data)
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         var functionBytes = Utf8.Encode(function, nameof(function));
         fixed (byte* functionValue = functionBytes)
         fixed (byte* dataValue = data)
@@ -172,7 +184,7 @@ public sealed unsafe class WebUiEvent
     /// <summary>Closes only the client that raised this event.</summary>
     public void CloseClient()
     {
-        ThrowIfInactive();
+        using var scope = EnterNative();
         WebUiNative.CloseClient(_nativeEvent);
     }
 
@@ -183,14 +195,36 @@ public sealed unsafe class WebUiEvent
         ThrowIfInactive();
         if (!TryRespond(result))
         {
-            throw new InvalidOperationException("This WebUI event has already received a response.");
+            if (Volatile.Read(ref _abandoned) != 0)
+            {
+                throw CreateAbandonedException();
+            }
+
+            throw CreateAnsweredException();
         }
     }
 
+    /// <summary>Sends the reply unless one was already sent or WebUI has abandoned the event.</summary>
     internal bool TryRespond(WebUiResult result)
     {
         if (Interlocked.CompareExchange(ref _responded, 1, 0) != 0)
         {
+            return false;
+        }
+
+        // From here on new accesses throw. Accesses already running on other threads must finish
+        // before the reply: once it is sent, WebUI stops waiting and frees the event.
+        var spinner = default(SpinWait);
+        while (Volatile.Read(ref _accessors) != 0)
+        {
+            spinner.SpinOnce();
+        }
+
+        if (!TryEnterNative(out var gated))
+        {
+            // WebUI already answered the call and released the event; there is nothing left to
+            // reply to. The event stays marked as responded so no fallback reply is attempted.
+            Volatile.Write(ref _abandoned, 1);
             return false;
         }
 
@@ -230,9 +264,19 @@ public sealed unsafe class WebUiEvent
             Volatile.Write(ref _responded, 0);
             throw;
         }
+        finally
+        {
+            if (gated)
+            {
+                WebUiNativeLifetime.Leave();
+            }
+        }
     }
 
     internal void Invalidate() => Volatile.Write(ref _active, 0);
+
+    /// <summary>Marks the end of the native callback; later access must go through the lifetime gate.</summary>
+    internal void EndDispatch() => Volatile.Write(ref _dispatching, 0);
 
     private void ReturnString(string value)
     {
@@ -245,7 +289,7 @@ public sealed unsafe class WebUiEvent
                 // with asynchronous_response enabled, never marks the event done.
                 // The wrapper-interface setter reaches the same event state and
                 // correctly completes an intentionally empty response.
-                WebUiNative.InterfaceSetResponse(_nativeEvent->Window, _nativeEvent->EventNumber, response);
+                WebUiNative.InterfaceSetResponse(WindowId, EventNumber, response);
             }
             else
             {
@@ -259,11 +303,65 @@ public sealed unsafe class WebUiEvent
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, WebUiNative.GetCount(_nativeEvent), nameof(index));
     }
 
+    private NativeScope EnterNative()
+    {
+        ThrowIfInactive();
+
+        // A Dekker handshake with TryRespond: either the reply waits for this access, or this
+        // access sees the reply and stays out.
+        Interlocked.Increment(ref _accessors);
+        if (Volatile.Read(ref _responded) != 0)
+        {
+            Interlocked.Decrement(ref _accessors);
+            throw CreateAnsweredException();
+        }
+
+        if (!TryEnterNative(out var gated))
+        {
+            Interlocked.Decrement(ref _accessors);
+            throw CreateAbandonedException();
+        }
+
+        return new NativeScope(this, gated);
+    }
+
+    private bool TryEnterNative(out bool gated)
+    {
+        // The thread still inside the native callback keeps the event's stack frame alive.
+        if (Volatile.Read(ref _dispatching) != 0 && Environment.CurrentManagedThreadId == _dispatchThreadId)
+        {
+            gated = false;
+            return true;
+        }
+
+        gated = true;
+        return WebUiNativeLifetime.TryEnter(_generation);
+    }
+
+    private static InvalidOperationException CreateAnsweredException()
+        => new("This WebUI event was already answered. WebUI releases an event once its reply is sent, so its arguments and client can no longer be reached; copy what you need before replying.");
+
+    private static InvalidOperationException CreateAbandonedException()
+        => new("WebUI is exiting or was cleaned and has released this event; its arguments and client can no longer be reached.");
+
     private void ThrowIfInactive()
     {
         if (Volatile.Read(ref _active) == 0)
         {
             throw new InvalidOperationException("This WebUI event is no longer active. Copy the values needed by background work before the callback returns.");
+        }
+    }
+
+    private readonly ref struct NativeScope(WebUiEvent owner, bool gated)
+    {
+        public void Dispose()
+        {
+            if (gated)
+            {
+                WebUiNativeLifetime.Leave();
+            }
+
+            Interlocked.Decrement(ref owner._accessors);
         }
     }
 }
