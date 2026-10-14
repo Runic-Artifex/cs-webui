@@ -96,16 +96,19 @@ internal sealed partial class WebUiProtocolClient : IAsyncDisposable
     }
 
     /// <summary>Sends a call with an arbitrary length list, which a well-behaved client derives from its arguments.</summary>
-    internal async Task SendCallAsync(string function, string lengths, ReadOnlyMemory<byte> arguments, CancellationToken cancellationToken)
+    /// <returns>The call's id, which its reply carries.</returns>
+    internal async Task<ushort> SendCallAsync(string function, string lengths, ReadOnlyMemory<byte> arguments, CancellationToken cancellationToken)
     {
+        var id = (ushort)Interlocked.Increment(ref _nextId);
         var name = Encoding.UTF8.GetBytes(function);
         var lengthBytes = Encoding.ASCII.GetBytes(lengths);
         var packet = new byte[HeaderSize + name.Length + 1 + lengthBytes.Length + 1 + arguments.Length];
-        WriteHeader(packet, (ushort)Interlocked.Increment(ref _nextId), CallFunction);
+        WriteHeader(packet, id, CallFunction);
         name.CopyTo(packet, HeaderSize);
         lengthBytes.CopyTo(packet, HeaderSize + name.Length + 1);
         arguments.Span.CopyTo(packet.AsSpan(HeaderSize + name.Length + 1 + lengthBytes.Length + 1));
         await _socket.SendAsync(packet, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken).ConfigureAwait(false);
+        return id;
     }
 
     /// <summary>Sends one backend call; WebUI processes each message on its own thread.</summary>
