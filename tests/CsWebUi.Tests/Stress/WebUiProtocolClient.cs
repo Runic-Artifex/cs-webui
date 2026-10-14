@@ -21,6 +21,7 @@ internal sealed partial class WebUiProtocolClient : IAsyncDisposable
     private const byte Signature = 0xDD;
     private const byte CallFunction = 0xF9;
     private const byte CheckToken = 0xF5;
+    private const byte JavaScript = 0xFE;
     private const int HeaderSize = 8;
 
     private readonly ClientWebSocket _socket;
@@ -75,8 +76,37 @@ internal sealed partial class WebUiProtocolClient : IAsyncDisposable
     }
 
     /// <summary>Receives the data of the reply to a call, exactly as WebUI framed it.</summary>
-    internal Task<byte[]> ReceiveReplyAsync(ushort id, CancellationToken cancellationToken)
-        => ReceiveAsync(CallFunction, id, cancellationToken);
+    internal async Task<byte[]> ReceiveReplyAsync(ushort id, CancellationToken cancellationToken)
+        => (await ReceiveAsync(CallFunction, id, cancellationToken).ConfigureAwait(false)).Data;
+
+    /// <summary>Receives the next script WebUI runs in this client (<c>webui_script</c>) and its run id.</summary>
+    internal async Task<(ushort Id, string Script)> ReceiveScriptAsync(CancellationToken cancellationToken)
+    {
+        var (id, data) = await ReceiveAsync(JavaScript, null, cancellationToken).ConfigureAwait(false);
+        return (id, Encoding.UTF8.GetString(data));
+    }
+
+    /// <summary>Sends a script result as webui.js does: <c>[header][error][result]\0</c>.</summary>
+    internal async Task SendScriptResultAsync(ushort id, ReadOnlyMemory<byte> result, CancellationToken cancellationToken)
+    {
+        var packet = new byte[HeaderSize + 1 + result.Length + 1];
+        WriteHeader(packet, id, JavaScript);
+        result.Span.CopyTo(packet.AsSpan(HeaderSize + 1));
+        await _socket.SendAsync(packet, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Sends a call with an arbitrary length list, which a well-behaved client derives from its arguments.</summary>
+    internal async Task SendCallAsync(string function, string lengths, ReadOnlyMemory<byte> arguments, CancellationToken cancellationToken)
+    {
+        var name = Encoding.UTF8.GetBytes(function);
+        var lengthBytes = Encoding.ASCII.GetBytes(lengths);
+        var packet = new byte[HeaderSize + name.Length + 1 + lengthBytes.Length + 1 + arguments.Length];
+        WriteHeader(packet, (ushort)Interlocked.Increment(ref _nextId), CallFunction);
+        name.CopyTo(packet, HeaderSize);
+        lengthBytes.CopyTo(packet, HeaderSize + name.Length + 1);
+        arguments.Span.CopyTo(packet.AsSpan(HeaderSize + name.Length + 1 + lengthBytes.Length + 1));
+        await _socket.SendAsync(packet, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken).ConfigureAwait(false);
+    }
 
     /// <summary>Sends one backend call; WebUI processes each message on its own thread.</summary>
     /// <returns>The call's id, which its reply carries.</returns>
@@ -108,8 +138,8 @@ internal sealed partial class WebUiProtocolClient : IAsyncDisposable
         packet[7] = command;
     }
 
-    /// <summary>Receives messages until one with this command and id arrives, and returns its data.</summary>
-    private async Task<byte[]> ReceiveAsync(byte command, ushort id, CancellationToken cancellationToken)
+    /// <summary>Receives messages until one with this command (and id, if given) arrives, and returns its data.</summary>
+    private async Task<(ushort Id, byte[] Data)> ReceiveAsync(byte command, ushort? id, CancellationToken cancellationToken)
     {
         var buffer = new byte[64 * 1024];
         while (true)
@@ -129,17 +159,20 @@ internal sealed partial class WebUiProtocolClient : IAsyncDisposable
             while (!result.EndOfMessage);
 
             var packet = message.ToArray();
-            if (packet.Length > HeaderSize
-                && packet[0] == Signature
-                && packet[7] == command
-                && BinaryPrimitives.ReadUInt16LittleEndian(packet.AsSpan(5, 2)) == id)
+            if (packet.Length > HeaderSize && packet[0] == Signature && packet[7] == command)
             {
+                var packetId = BinaryPrimitives.ReadUInt16LittleEndian(packet.AsSpan(5, 2));
+                if (id is { } expected && packetId != expected)
+                {
+                    continue;
+                }
+
                 if (packet[^1] != 0)
                 {
                     throw new InvalidDataException("WebUI's message does not end with its null byte.");
                 }
 
-                return packet[HeaderSize..^1];
+                return (packetId, packet[HeaderSize..^1]);
             }
         }
     }

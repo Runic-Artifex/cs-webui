@@ -225,6 +225,10 @@ public static class WebUiApplication
     /// inside a callback, it only exits WebUI; call it again after <see cref="Wait"/> returns to
     /// release the native state.
     /// </para>
+    /// <para>
+    /// After WebUI has released its state, this also frees the response buffers kept by
+    /// <see cref="WebUiWindow.ExecuteJavaScript"/> calls that failed with a finite timeout.
+    /// </para>
     /// </remarks>
     public static void Clean()
     {

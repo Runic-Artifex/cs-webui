@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using CsWebUi.Native;
 
 namespace CsWebUi.Internal;
@@ -47,6 +48,7 @@ internal static class WebUiNativeLifetime
     internal static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(75);
 
     private static readonly object TransitionGate = new();
+    private static readonly List<nint> RetainedBuffers = [];
     private static int _generation;
     private static int _closed;
     private static int _accessors;
@@ -87,6 +89,32 @@ internal static class WebUiNativeLifetime
         {
             generation = Volatile.Read(ref _generation);
             return create();
+        }
+    }
+
+    /// <summary>Gets how many native buffers wait for the next clean.</summary>
+    internal static int RetainedBufferCount
+    {
+        get
+        {
+            lock (RetainedBuffers)
+            {
+                return RetainedBuffers.Count;
+            }
+        }
+    }
+
+    /// <summary>Keeps a native buffer WebUI may still write into until <c>webui_clean()</c> has returned.</summary>
+    /// <remarks>
+    /// <c>webui_script()</c> leaves a timed-out call's buffer registered, and copies a late result
+    /// into it. Only <c>webui_clean()</c> drops that registration: it frees WebUI's state, and the
+    /// next initialization clears it.
+    /// </remarks>
+    internal static unsafe void RetainUntilClean(void* buffer)
+    {
+        lock (RetainedBuffers)
+        {
+            RetainedBuffers.Add((nint)buffer);
         }
     }
 
@@ -148,6 +176,21 @@ internal static class WebUiNativeLifetime
             WebUiNative.Clean();
             Interlocked.Increment(ref _generation);
             Interlocked.Exchange(ref _closed, 0);
+        }
+
+        ReleaseRetainedBuffers();
+    }
+
+    private static unsafe void ReleaseRetainedBuffers()
+    {
+        lock (RetainedBuffers)
+        {
+            foreach (var buffer in RetainedBuffers)
+            {
+                NativeMemory.Free((void*)buffer);
+            }
+
+            RetainedBuffers.Clear();
         }
     }
 
