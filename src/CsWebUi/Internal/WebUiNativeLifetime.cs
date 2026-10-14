@@ -106,9 +106,11 @@ internal static class WebUiNativeLifetime
 
     /// <summary>Keeps a native buffer WebUI may still write into until <c>webui_clean()</c> has returned.</summary>
     /// <remarks>
-    /// <c>webui_script()</c> leaves a timed-out call's buffer registered, and copies a late result
-    /// into it. Only <c>webui_clean()</c> drops that registration: it frees WebUI's state, and the
-    /// next initialization clears it.
+    /// Before 2456744e6, <c>webui_script()</c> left a timed-out call's buffer registered and copied a
+    /// late result into it. Only <c>webui_clean()</c> dropped that registration: it frees WebUI's
+    /// state, and the next initialization clears it. Since 2456744e6 (webui-dev/webui#722) WebUI
+    /// releases the buffer under its lock before <c>webui_script()</c> returns and discards a late
+    /// result, so with that WebUI the kept buffer is never written; it is kept for older builds.
     /// </remarks>
     internal static unsafe void RetainUntilClean(void* buffer)
     {
