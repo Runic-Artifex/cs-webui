@@ -304,11 +304,13 @@ public sealed unsafe class WebUiEvent
         var count = WebUiNative.GetCount(_nativeEvent);
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, count, nameof(index));
 
-        // WebUI checks a call's argument lengths only by their sum, which wraps in size_t: a
-        // malformed message can claim an argument longer than the bytes it carries if another
-        // claims nearly SIZE_MAX. WebUI receives at most WEBUI_MAX_BUF bytes per message, so no
-        // genuine argument is longer; with every length within it the sum cannot wrap, and
-        // WebUI's check then guarantees the bytes are there.
+        // WebUI before 2456744e6 checks a call's argument lengths only by their sum, which wraps
+        // in size_t: a malformed message can claim an argument longer than the bytes it carries if
+        // another claims nearly SIZE_MAX. WebUI receives at most WEBUI_MAX_BUF bytes per message,
+        // so no genuine argument is longer; with every length within it the sum cannot wrap, and
+        // WebUI's check then guarantees the bytes are there. Since 2456744e6 (webui-dev/webui#722)
+        // WebUI checks each length against the bytes left and drops such a call itself, so this
+        // check is redundant with that WebUI; it is kept for older builds.
         for (nuint i = 0; i < count; i++)
         {
             if (WebUiNative.GetSizeAt(_nativeEvent, i) > MaxArgumentBytes)

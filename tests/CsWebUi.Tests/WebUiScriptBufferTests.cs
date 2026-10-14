@@ -5,8 +5,9 @@ using CsWebUi.Tests.Stress;
 namespace CsWebUi.Tests;
 
 /// <summary>
-/// <c>webui_script()</c> copies the result into the caller's buffer, and leaves that buffer
-/// registered after a timeout, so a late result is still copied into it.
+/// <c>webui_script()</c> copies the result into the caller's buffer. Before WebUI 2456744e6 it left
+/// that buffer registered after a timeout, so a late result was still copied into it; CS-WebUI
+/// keeps such a buffer until Clean either way.
 /// </summary>
 public sealed class WebUiScriptBufferTests
 {
@@ -66,11 +67,11 @@ public sealed class WebUiScriptBufferTests
         {
             await using var client = await ConnectAsync(window);
 
-            // WebUI copies at most the buffer's size and then writes no terminator.
-            Assert.Equal("0123456789abcdef", await RunAsync(window, client, "0123456789abcdefXYZ", 16));
+            // Since 2456744e6 WebUI copies at most the buffer's size less one byte, and terminates it.
+            Assert.Equal("0123456789abcde", await RunAsync(window, client, "0123456789abcdefXYZ", 16));
 
             // A character cut in half decodes to a replacement character, within the buffer.
-            Assert.Equal("0123456789abcde�", await RunAsync(window, client, "0123456789abcdeÜber", 16));
+            Assert.Equal("0123456789abcd�", await RunAsync(window, client, "0123456789abcdÜber", 16));
 
             // A result that fits ends at its terminator.
             Assert.Equal("short", await RunAsync(window, client, "short", 16));
@@ -114,29 +115,27 @@ public sealed class WebUiScriptBufferTests
     public async Task ArgumentLengthsThatWrapAreRejected()
     {
         var forged = new TaskCompletionSource<Exception?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var probe = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         using var window = new WebUiWindow();
         window.Bind("forged", e => forged.TrySetResult(Record(() => e.GetString())));
-        window.Bind("probe", _ => probe.TrySetResult());
         try
         {
             await using var client = await ConnectAsync(window);
 
-            // WebUI only checks that (100 + 1) + (n + 1) equals the 8 argument bytes received;
-            // with n = 2^64 - 94 that sum wraps, and argument 0 claims 100 bytes it does not have.
+            // Before 2456744e6, WebUI only checked that (100 + 1) + (n + 1) equals the 8 argument
+            // bytes received; with n = 2^64 - 94 that sum wraps, and argument 0 claims 100 bytes it
+            // does not have. Since then WebUI checks each length against the bytes left, drops the
+            // call and replies with nothing; so does any WebUI where strtoul is 32-bit (Windows),
+            // because the sum cannot wrap there. CS-WebUI's own check rejects the call for a WebUI
+            // that still passes it to the callback.
             var payload = new byte[8];
-            await client.SendCallAsync("forged", "100;18446744073709551522", payload, CancellationToken.None);
-            await client.CallAsync("probe", "argument", CancellationToken.None);
-            await probe.Task.WaitAsync(Wait);
+            var id = await client.SendCallAsync("forged", "100;18446744073709551522", payload, CancellationToken.None);
 
-            // strtoul is 32-bit on Windows, so the sum cannot wrap there and WebUI drops the call.
-            if (OperatingSystem.IsWindows() || !Environment.Is64BitProcess)
+            // WebUI replies after the callback has returned, or at once when it drops the call.
+            Assert.Empty(await client.ReceiveReplyAsync(id, CancellationToken.None).WaitAsync(Wait));
+            if (forged.Task.IsCompleted)
             {
-                return;
+                Assert.IsType<InvalidDataException>(await forged.Task);
             }
-
-            var exception = await forged.Task.WaitAsync(Wait);
-            Assert.IsType<InvalidDataException>(exception);
         }
         finally
         {

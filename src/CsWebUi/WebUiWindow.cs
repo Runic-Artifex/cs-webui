@@ -804,13 +804,15 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// <remarks>
     /// <para>
     /// The result ends at its first null character, because WebUI copies it as a C string. A
-    /// result longer than <paramref name="responseBufferSize"/> is cut to that many bytes.
+    /// result that does not fit is cut to <paramref name="responseBufferSize"/> - 1 bytes (to
+    /// <paramref name="responseBufferSize"/> bytes by WebUI builds before 2456744e6).
     /// </para>
     /// <para>
-    /// WebUI keeps the response buffer registered after its wait ends and copies a result that
-    /// arrives later into it. So when a call with a finite <paramref name="timeout"/> fails, its
-    /// buffer (<paramref name="responseBufferSize"/> bytes of native memory) is kept until
-    /// <see cref="WebUiApplication.Clean"/> releases WebUI's state; each such call keeps one.
+    /// WebUI builds before 2456744e6 keep the response buffer registered after their wait ends and
+    /// copy a result that arrives later into it. So when a call with a finite
+    /// <paramref name="timeout"/> fails, its buffer (<paramref name="responseBufferSize"/> bytes of
+    /// native memory) is kept until <see cref="WebUiApplication.Clean"/> releases WebUI's state;
+    /// each such call keeps one.
     /// </para>
     /// </remarks>
     /// <exception cref="WebUiException">The script failed or timed out.</exception>
@@ -826,8 +828,11 @@ public sealed unsafe class WebUiWindow : IDisposable
         var scriptBytes = Utf8.Encode(script, nameof(script));
         var seconds = timeout is null ? 0u : checked((nuint)Math.Ceiling(timeout.Value.TotalSeconds));
 
-        // webui_script() keeps the buffer registered when its wait ends and copies a result that
-        // arrives later into it. A managed array would be unpinned by then, so use native memory.
+        // Before 2456744e6, webui_script() kept the buffer registered when its wait ended and copied
+        // a result that arrived later into it. A managed array would be unpinned by then, so use
+        // native memory. Since 2456744e6 (webui-dev/webui#722) WebUI releases the buffer under its
+        // lock before returning, so no write follows the return; the native buffer is redundant
+        // with that WebUI but kept for any WebUI loaded through CSWEBUI_NATIVE_LIBRARY.
         var response = (byte*)NativeMemory.AllocZeroed((nuint)responseBufferSize);
         var release = true;
         try
@@ -843,6 +848,8 @@ public sealed unsafe class WebUiWindow : IDisposable
                 // WebUI waits without limit for 0 or more than 86400 seconds, so then it failed
                 // without waiting or after the result arrived. A finite wait may have timed out,
                 // and WebUI times it with its own clock, so keep the buffer for a late result.
+                // Redundant since 2456744e6, which never writes after returning; kept until no
+                // supported WebUI predates it.
                 if (seconds is >= 1 and <= 86400)
                 {
                     release = false;
