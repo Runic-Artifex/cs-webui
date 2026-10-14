@@ -25,17 +25,17 @@
     "webui": {
       "flake": false,
       "locked": {
-        "lastModified": 1791208127,
-        "narHash": "sha256-J0lSLwBaMo0bxgXIq6I34SC0Dqc4ZlP0ZG18bXzeacY=",
+        "lastModified": 1791987261,
+        "narHash": "sha256-kyp04QIg1o4mMqnLfxgP/0BTksvdWvPlrdRm3TOKIhk=",
         "owner": "webui-dev",
         "repo": "webui",
-        "rev": "f1b28eeeecfc2d63bdb4d4857c6f137468c6d6f6",
+        "rev": "4e65ad711838cfd185a40c9d7a9e13b209e6ec01",
         "type": "github"
       },
       "original": {
         "owner": "webui-dev",
         "repo": "webui",
-        "rev": "f1b28eeeecfc2d63bdb4d4857c6f137468c6d6f6",
+        "rev": "4e65ad711838cfd185a40c9d7a9e13b209e6ec01",
         "type": "github"
       }
     }

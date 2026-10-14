@@ -32,6 +32,14 @@ namespace CsWebUi.Internal;
 /// protected. WebUI can also call <c>webui_exit()</c> itself, from <c>_webui_panic</c> after an
 /// internal failure such as an allocation failure; that exit bypasses this gate.
 /// </para>
+/// <para>
+/// Since 4e65ad711 (webui-dev/webui#720 and #721), WebUI keeps an event it stopped waiting for,
+/// ignores a later reply to it, and assigns event slots under its lock. A late reply after an exit
+/// alone, including one from <c>_webui_panic</c>, is then safe in WebUI itself. The gate is still
+/// required for <c>webui_clean()</c>: it frees every window and event while a reply can be in
+/// flight, and clears the flag that late replies check only after the memory is gone. It also
+/// keeps the managed contract that a released event throws <see cref="InvalidOperationException"/>.
+/// </para>
 /// </remarks>
 internal static class WebUiNativeLifetime
 {

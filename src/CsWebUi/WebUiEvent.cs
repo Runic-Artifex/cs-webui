@@ -285,10 +285,10 @@ public sealed unsafe class WebUiEvent
         {
             if (value.Length == 0)
             {
-                // webui_return_string() exits early for an empty C string and,
-                // with asynchronous_response enabled, never marks the event done.
-                // The wrapper-interface setter reaches the same event state and
-                // correctly completes an intentionally empty response.
+                // Before WebUI 4e65ad711, webui_return_string() exited early for an
+                // empty C string and, with asynchronous_response enabled, never marked
+                // the event done. The wrapper-interface setter reaches the same event
+                // state and completes an intentionally empty response in every version.
                 WebUiNative.InterfaceSetResponse(WindowId, EventNumber, response);
             }
             else

@@ -88,7 +88,9 @@ calls with an empty result and releases their events. CS-WebUI discards a reply
 that completes after that point instead of writing it into the released event,
 so shutting down with calls still pending is safe. Use `WebUiApplication.Exit`
 rather than the raw `WebUiNative.Exit`, which bypasses this protection; WebUI
-can also exit by itself after an internal failure, which CS-WebUI does not see.
+can also exit by itself after an internal failure, which CS-WebUI does not see;
+since WebUI `4e65ad711` WebUI itself ignores a late reply to an event it has
+released at exit.
 Once a reply has been sent, WebUI frees the event, so later event members throw
 `InvalidOperationException`. `Clean` waits up to 75 seconds for callbacks still
 running on other threads before WebUI frees its memory.
@@ -300,7 +302,7 @@ nix flake check
 - The raw package uses explicit Cdecl `LibraryImport` declarations, `nuint` for `size_t`, one-byte C booleans, and unmanaged function pointers.
 - Both packages are trimming- and NativeAOT-oriented. The high-level callback dispatcher has no reflection-based registration.
 - The high-level API parses JavaScript numeric arguments and serializes double results with the invariant culture, avoiding process-locale differences in WebUI's raw float helpers.
-- Empty high-level callback results complete correctly when async bindings are present; WebUI's direct empty-string helper otherwise leaves that response pending.
+- Empty high-level callback results complete correctly when async bindings are present; before WebUI `4e65ad711`, its direct empty-string helper left that response pending.
 - Strings passed to WebUI reject embedded null characters instead of silently truncating at the native C-string boundary.
 - WebUI owns pointers returned from event accessors and other borrowed APIs. The safe `WebUiEvent` wrapper invalidates access after the callback completes.
 - Browser mode needs an installed browser. Embedded WebView mode has platform dependencies, including the WebView2 runtime/loader on Windows and GTK/WebKit on Linux.
