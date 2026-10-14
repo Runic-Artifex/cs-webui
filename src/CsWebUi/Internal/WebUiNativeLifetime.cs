@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using CsWebUi.Native;
 
 namespace CsWebUi.Internal;
@@ -32,6 +33,14 @@ namespace CsWebUi.Internal;
 /// protected. WebUI can also call <c>webui_exit()</c> itself, from <c>_webui_panic</c> after an
 /// internal failure such as an allocation failure; that exit bypasses this gate.
 /// </para>
+/// <para>
+/// Since 4e65ad711 (webui-dev/webui#720 and #721), WebUI keeps an event it stopped waiting for,
+/// ignores a later reply to it, and assigns event slots under its lock. A late reply after an exit
+/// alone, including one from <c>_webui_panic</c>, is then safe in WebUI itself. The gate is still
+/// required for <c>webui_clean()</c>: it frees every window and event while a reply can be in
+/// flight, and clears the flag that late replies check only after the memory is gone. It also
+/// keeps the managed contract that a released event throws <see cref="InvalidOperationException"/>.
+/// </para>
 /// </remarks>
 internal static class WebUiNativeLifetime
 {
@@ -39,6 +48,7 @@ internal static class WebUiNativeLifetime
     internal static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(75);
 
     private static readonly object TransitionGate = new();
+    private static readonly List<nint> RetainedBuffers = [];
     private static int _generation;
     private static int _closed;
     private static int _accessors;
@@ -79,6 +89,32 @@ internal static class WebUiNativeLifetime
         {
             generation = Volatile.Read(ref _generation);
             return create();
+        }
+    }
+
+    /// <summary>Gets how many native buffers wait for the next clean.</summary>
+    internal static int RetainedBufferCount
+    {
+        get
+        {
+            lock (RetainedBuffers)
+            {
+                return RetainedBuffers.Count;
+            }
+        }
+    }
+
+    /// <summary>Keeps a native buffer WebUI may still write into until <c>webui_clean()</c> has returned.</summary>
+    /// <remarks>
+    /// <c>webui_script()</c> leaves a timed-out call's buffer registered, and copies a late result
+    /// into it. Only <c>webui_clean()</c> drops that registration: it frees WebUI's state, and the
+    /// next initialization clears it.
+    /// </remarks>
+    internal static unsafe void RetainUntilClean(void* buffer)
+    {
+        lock (RetainedBuffers)
+        {
+            RetainedBuffers.Add((nint)buffer);
         }
     }
 
@@ -140,6 +176,21 @@ internal static class WebUiNativeLifetime
             WebUiNative.Clean();
             Interlocked.Increment(ref _generation);
             Interlocked.Exchange(ref _closed, 0);
+        }
+
+        ReleaseRetainedBuffers();
+    }
+
+    private static unsafe void ReleaseRetainedBuffers()
+    {
+        lock (RetainedBuffers)
+        {
+            foreach (var buffer in RetainedBuffers)
+            {
+                NativeMemory.Free((void*)buffer);
+            }
+
+            RetainedBuffers.Clear();
         }
     }
 

@@ -261,6 +261,14 @@ jobs:
           --configuration Release --no-restore --
           driver --runs 300 --parallel 8 --pending 16 --timeout-seconds 120
 
+      - name: Stress shutdowns with calls sent together (webui-dev/webui#721)
+        env:
+          CSWEBUI_NATIVE_LIBRARY: ${{ github.workspace }}/artifacts/native/linux-x64/libwebui-2.so
+        run: >-
+          dotnet run --project tests/CsWebUi.ShutdownStress/CsWebUi.ShutdownStress.csproj
+          --configuration Release --no-restore --
+          driver --runs 100 --parallel 8 --pending 32 --burst 1 --timeout-seconds 120
+
       - name: Publish and run the NativeAOT smoke test
         shell: bash
         run: |

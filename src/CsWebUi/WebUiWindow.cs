@@ -801,6 +801,18 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// <param name="script">The JavaScript expression to run.</param>
     /// <param name="timeout">The maximum native wait time. <see langword="null"/> uses WebUI's unlimited timeout.</param>
     /// <param name="responseBufferSize">Maximum UTF-8 response bytes, including the null terminator.</param>
+    /// <remarks>
+    /// <para>
+    /// The result ends at its first null character, because WebUI copies it as a C string. A
+    /// result longer than <paramref name="responseBufferSize"/> is cut to that many bytes.
+    /// </para>
+    /// <para>
+    /// WebUI keeps the response buffer registered after its wait ends and copies a result that
+    /// arrives later into it. So when a call with a finite <paramref name="timeout"/> fails, its
+    /// buffer (<paramref name="responseBufferSize"/> bytes of native memory) is kept until
+    /// <see cref="WebUiApplication.Clean"/> releases WebUI's state; each such call keeps one.
+    /// </para>
+    /// </remarks>
     /// <exception cref="WebUiException">The script failed or timed out.</exception>
     public string ExecuteJavaScript(string script, TimeSpan? timeout = null, int responseBufferSize = 4 * 1024)
     {
@@ -812,20 +824,45 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
 
         var scriptBytes = Utf8.Encode(script, nameof(script));
-        var responseBytes = GC.AllocateUninitializedArray<byte>(responseBufferSize);
-        Array.Clear(responseBytes);
         var seconds = timeout is null ? 0u : checked((nuint)Math.Ceiling(timeout.Value.TotalSeconds));
-        fixed (byte* nativeScript = scriptBytes)
-        fixed (byte* nativeResponse = responseBytes)
+
+        // webui_script() keeps the buffer registered when its wait ends and copies a result that
+        // arrives later into it. A managed array would be unpinned by then, so use native memory.
+        var response = (byte*)NativeMemory.AllocZeroed((nuint)responseBufferSize);
+        var release = true;
+        try
         {
-            if (WebUiNative.Script(_id, nativeScript, seconds, nativeResponse, (nuint)responseBytes.Length) == 0)
+            bool succeeded;
+            fixed (byte* nativeScript = scriptBytes)
             {
+                succeeded = WebUiNative.Script(_id, nativeScript, seconds, response, (nuint)responseBufferSize) != 0;
+            }
+
+            if (!succeeded)
+            {
+                // WebUI waits without limit for 0 or more than 86400 seconds, so then it failed
+                // without waiting or after the result arrived. A finite wait may have timed out,
+                // and WebUI times it with its own clock, so keep the buffer for a late result.
+                if (seconds is >= 1 and <= 86400)
+                {
+                    release = false;
+                    WebUiNativeLifetime.RetainUntilClean(response);
+                }
+
                 throw WebUiApplication.CreateNativeException();
             }
-        }
 
-        var terminator = Array.IndexOf(responseBytes, (byte)0);
-        return Encoding.UTF8.GetString(responseBytes, 0, terminator < 0 ? responseBytes.Length : terminator);
+            var result = new ReadOnlySpan<byte>(response, responseBufferSize);
+            var terminator = result.IndexOf((byte)0);
+            return Encoding.UTF8.GetString(terminator < 0 ? result : result[..terminator]);
+        }
+        finally
+        {
+            if (release)
+            {
+                NativeMemory.Free(response);
+            }
+        }
     }
 
     /// <summary>Sends arbitrary bytes to every connected client.</summary>

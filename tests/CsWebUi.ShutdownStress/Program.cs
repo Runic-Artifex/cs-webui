@@ -5,9 +5,10 @@ using CsWebUi.Tests.Stress;
 
 // Shutdown stress for runic-sdk#239.
 //
-//   host   [--iterations N] [--pending M] [--seed S]
+//   host   [--iterations N] [--pending M] [--burst 0|1] [--seed S]
 //     Runs N host lifetimes in this process, each shut down with M replies pending.
-//   driver [--runs R] [--parallel P] [--iterations N] [--pending M] [--timeout-seconds T]
+//     --burst 1 sends the M calls at once instead of one at a time (webui-dev/webui#721).
+//   driver [--runs R] [--parallel P] [--iterations N] [--pending M] [--burst 0|1] [--timeout-seconds T]
 //     Starts R host processes, P at a time, and reports how many crashed or hung. A crash
 //     kills a whole process, so each run is a separate process.
 
@@ -29,10 +30,11 @@ static async Task<int> RunHostAsync(Arguments arguments)
 {
     var iterations = arguments.GetInt32("iterations", 1);
     var pending = arguments.GetInt32("pending", 32);
+    var burst = arguments.GetInt32("burst", 0) != 0;
     var random = new Random(arguments.GetInt32("seed", Environment.ProcessId));
     for (var i = 0; i < iterations; i++)
     {
-        await ShutdownStressScenario.RunOnceAsync(pending, random, CancellationToken.None).ConfigureAwait(false);
+        await ShutdownStressScenario.RunOnceAsync(pending, random, CancellationToken.None, burst).ConfigureAwait(false);
     }
 
     return 0;
@@ -44,6 +46,7 @@ static async Task<int> RunDriverAsync(Arguments arguments)
     var parallel = arguments.GetInt32("parallel", Math.Max(1, Environment.ProcessorCount / 2));
     var iterations = arguments.GetInt32("iterations", 1);
     var pending = arguments.GetInt32("pending", 32);
+    var burst = arguments.GetInt32("burst", 0);
     var timeout = TimeSpan.FromSeconds(arguments.GetInt32("timeout-seconds", 120));
 
     var (fileName, prefix) = SelfCommand();
@@ -59,7 +62,7 @@ static async Task<int> RunDriverAsync(Arguments arguments)
         {
             var outcome = await RunChildAsync(
                 fileName,
-                [.. prefix, "host", "--iterations", Invariant(iterations), "--pending", Invariant(pending), "--seed", Invariant(run)],
+                [.. prefix, "host", "--iterations", Invariant(iterations), "--pending", Invariant(pending), "--burst", Invariant(burst), "--seed", Invariant(run)],
                 timeout).ConfigureAwait(false);
             lock (failures)
             {
@@ -80,7 +83,7 @@ static async Task<int> RunDriverAsync(Arguments arguments)
 
     var shutdowns = runs * iterations;
     Console.WriteLine(
-        $"{runs} runs x {iterations} shutdowns with {pending} pending replies: {failures.Count} failed runs, " +
+        $"{runs} runs x {iterations} shutdowns with {pending} pending replies{(burst != 0 ? " sent together" : string.Empty)}: {failures.Count} failed runs, " +
         $"{runs - failures.Count} clean, in {stopwatch.Elapsed.TotalSeconds:F1} s ({shutdowns} shutdowns).");
     return failures.Count == 0 ? 0 : 1;
 }

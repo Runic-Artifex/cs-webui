@@ -20,7 +20,15 @@ internal static class ShutdownStressScenario
     private const string PendingFunction = "pending";
     private static int _nextWindowId;
 
-    internal static async Task RunOnceAsync(int pendingCalls, Random random, CancellationToken cancellationToken)
+    /// <param name="pendingCalls">How many calls are still waiting for their reply at shutdown.</param>
+    /// <param name="random">Chooses when the replies are released.</param>
+    /// <param name="cancellationToken">Cancels the run.</param>
+    /// <param name="sendTogether">
+    /// Sends every call at once instead of one at a time (webui-dev/webui#721). WebUI before
+    /// 9f36ede5d assigned event slots without holding its lock, so calls arriving together could
+    /// share one slot.
+    /// </param>
+    internal static async Task RunOnceAsync(int pendingCalls, Random random, CancellationToken cancellationToken, bool sendTogether = false)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(pendingCalls, 1);
 
@@ -53,12 +61,21 @@ internal static class ShutdownStressScenario
                 await client.CallAsync(PendingFunction, i.ToString(System.Globalization.CultureInfo.InvariantCulture), cancellationToken)
                     .ConfigureAwait(false);
 
-                // Send the next call only once this one reached its binding, as webui.js-based
-                // clients such as Runic's do: WebUI assigns event slots without holding its lock
-                // (_webui_new_event_inf), so calls that arrive together can share one slot.
-                if (!await admitted.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false))
+                // By default, send the next call only once this one reached its binding, as
+                // webui.js-based clients such as Runic's do: WebUI before 9f36ede5d assigned event
+                // slots without holding its lock (_webui_new_event_inf), so calls that arrive
+                // together could share one slot.
+                if (!sendTogether && !await admitted.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false))
                 {
                     throw new TimeoutException($"Call {i} did not reach its binding.");
+                }
+            }
+
+            for (var i = 0; sendTogether && i < pendingCalls; i++)
+            {
+                if (!await admitted.WaitAsync(TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false))
+                {
+                    throw new TimeoutException($"Only {i} of {pendingCalls} calls sent together reached their binding.");
                 }
             }
 

@@ -1,3 +1,4 @@
+using System.Text;
 using CsWebUi.Internal;
 using CsWebUi.Native;
 
@@ -15,6 +16,9 @@ namespace CsWebUi;
 /// </remarks>
 public sealed unsafe class WebUiEvent
 {
+    /// <summary>WebUI's WEBUI_MAX_BUF: the largest message WebUI receives, and so the largest argument.</summary>
+    private const nuint MaxArgumentBytes = 64_000_000;
+
     private readonly WebUiWindow _window;
     private readonly WebUiEventNative* _nativeEvent;
     private readonly int _generation;
@@ -81,55 +85,49 @@ public sealed unsafe class WebUiEvent
 
     /// <summary>Gets an argument as a signed 64-bit integer.</summary>
     /// <exception cref="FormatException">The argument is not a JavaScript-compatible 64-bit integer.</exception>
+    /// <exception cref="InvalidDataException">The call is malformed: an argument claims more bytes than WebUI accepts in a message.</exception>
     public long GetInt64(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-        return WebUiArgumentParser.ParseInt64(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
+        return WebUiArgumentParser.ParseInt64(ReadStringArgument(index));
     }
 
     /// <summary>Gets an argument as a double-precision floating-point number.</summary>
     /// <exception cref="FormatException">The argument is not a JavaScript-compatible floating-point value.</exception>
+    /// <exception cref="InvalidDataException">The call is malformed: an argument claims more bytes than WebUI accepts in a message.</exception>
     public double GetDouble(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-        return WebUiArgumentParser.ParseDouble(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
+        return WebUiArgumentParser.ParseDouble(ReadStringArgument(index));
     }
 
     /// <summary>Gets an argument as a Boolean value.</summary>
     /// <exception cref="FormatException">The argument is not a JavaScript-compatible Boolean value.</exception>
+    /// <exception cref="InvalidDataException">The call is malformed: an argument claims more bytes than WebUI accepts in a message.</exception>
     public bool GetBoolean(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-        return WebUiArgumentParser.ParseBoolean(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
+        return WebUiArgumentParser.ParseBoolean(ReadStringArgument(index));
     }
 
     /// <summary>Gets an argument as a UTF-8 string.</summary>
+    /// <remarks>
+    /// The string is read with the byte length WebUI received, so null characters sent by
+    /// JavaScript are preserved rather than ending the string early.
+    /// </remarks>
+    /// <exception cref="InvalidDataException">The call is malformed: an argument claims more bytes than WebUI accepts in a message.</exception>
     public string GetString(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-        return Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index));
+        return ReadStringArgument(index);
     }
 
     /// <summary>Copies an argument's raw bytes into managed memory.</summary>
+    /// <exception cref="InvalidDataException">The call is malformed: an argument claims more bytes than WebUI accepts in a message.</exception>
     public byte[] GetBytes(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-
-        var size = WebUiNative.GetSizeAt(_nativeEvent, index);
-        if (size > int.MaxValue)
-        {
-            throw new InvalidOperationException("The WebUI argument is too large for a managed array.");
-        }
-
-        var source = WebUiNative.GetStringAt(_nativeEvent, index);
-        return source is null || size == 0
-            ? []
-            : new ReadOnlySpan<byte>(source, checked((int)size)).ToArray();
+        return ReadArgument(index).ToArray();
     }
 
     /// <summary>Sends JavaScript to only the client that raised this event.</summary>
@@ -285,10 +283,10 @@ public sealed unsafe class WebUiEvent
         {
             if (value.Length == 0)
             {
-                // webui_return_string() exits early for an empty C string and,
-                // with asynchronous_response enabled, never marks the event done.
-                // The wrapper-interface setter reaches the same event state and
-                // correctly completes an intentionally empty response.
+                // Before WebUI 4e65ad711, webui_return_string() exited early for an
+                // empty C string and, with asynchronous_response enabled, never marked
+                // the event done. The wrapper-interface setter reaches the same event
+                // state and completes an intentionally empty response in every version.
                 WebUiNative.InterfaceSetResponse(WindowId, EventNumber, response);
             }
             else
@@ -298,9 +296,35 @@ public sealed unsafe class WebUiEvent
         }
     }
 
-    private void ValidateArgumentIndex(nuint index)
+    private string ReadStringArgument(nuint index) => Encoding.UTF8.GetString(ReadArgument(index));
+
+    /// <summary>Gets an argument's bytes, bounded by the size WebUI received; valid inside a native scope.</summary>
+    private ReadOnlySpan<byte> ReadArgument(nuint index)
     {
-        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, WebUiNative.GetCount(_nativeEvent), nameof(index));
+        var count = WebUiNative.GetCount(_nativeEvent);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, count, nameof(index));
+
+        // WebUI checks a call's argument lengths only by their sum, which wraps in size_t: a
+        // malformed message can claim an argument longer than the bytes it carries if another
+        // claims nearly SIZE_MAX. WebUI receives at most WEBUI_MAX_BUF bytes per message, so no
+        // genuine argument is longer; with every length within it the sum cannot wrap, and
+        // WebUI's check then guarantees the bytes are there.
+        for (nuint i = 0; i < count; i++)
+        {
+            if (WebUiNative.GetSizeAt(_nativeEvent, i) > MaxArgumentBytes)
+            {
+                throw new InvalidDataException("The WebUI call is malformed: an argument claims more bytes than WebUI accepts in a message.");
+            }
+        }
+
+        var size = WebUiNative.GetSizeAt(_nativeEvent, index);
+        if (size == 0)
+        {
+            return [];
+        }
+
+        var source = WebUiNative.GetStringAt(_nativeEvent, index);
+        return source is null ? [] : new ReadOnlySpan<byte>(source, (int)size);
     }
 
     private NativeScope EnterNative()
