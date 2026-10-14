@@ -9,7 +9,9 @@ namespace CsWebUi;
 /// passed to <see cref="WebUiWindow.BindAsync"/> stays active until its returned operation ends,
 /// unless <see cref="WebUiApplication.Exit"/> or <see cref="WebUiApplication.Clean"/> runs first:
 /// WebUI then stops waiting for the reply and releases the event, so its arguments and client can
-/// only be reached from the binding's synchronous part.
+/// only be reached from the binding's synchronous part. Once a reply has been sent, WebUI frees the
+/// event shortly afterwards, so every later member that reaches the native event throws
+/// <see cref="InvalidOperationException"/>, on any thread.
 /// </remarks>
 public sealed unsafe class WebUiEvent
 {
@@ -21,6 +23,7 @@ public sealed unsafe class WebUiEvent
     private int _active = 1;
     private int _responded;
     private int _abandoned;
+    private int _accessors;
 
     internal WebUiEvent(WebUiWindow window, WebUiEventNative* nativeEvent)
     {
@@ -197,7 +200,7 @@ public sealed unsafe class WebUiEvent
                 throw CreateAbandonedException();
             }
 
-            throw new InvalidOperationException("This WebUI event has already received a response.");
+            throw CreateAnsweredException();
         }
     }
 
@@ -207,6 +210,14 @@ public sealed unsafe class WebUiEvent
         if (Interlocked.CompareExchange(ref _responded, 1, 0) != 0)
         {
             return false;
+        }
+
+        // From here on new accesses throw. Accesses already running on other threads must finish
+        // before the reply: once it is sent, WebUI stops waiting and frees the event.
+        var spinner = default(SpinWait);
+        while (Volatile.Read(ref _accessors) != 0)
+        {
+            spinner.SpinOnce();
         }
 
         if (!TryEnterNative(out var gated))
@@ -295,12 +306,23 @@ public sealed unsafe class WebUiEvent
     private NativeScope EnterNative()
     {
         ThrowIfInactive();
+
+        // A Dekker handshake with TryRespond: either the reply waits for this access, or this
+        // access sees the reply and stays out.
+        Interlocked.Increment(ref _accessors);
+        if (Volatile.Read(ref _responded) != 0)
+        {
+            Interlocked.Decrement(ref _accessors);
+            throw CreateAnsweredException();
+        }
+
         if (!TryEnterNative(out var gated))
         {
+            Interlocked.Decrement(ref _accessors);
             throw CreateAbandonedException();
         }
 
-        return new NativeScope(gated);
+        return new NativeScope(this, gated);
     }
 
     private bool TryEnterNative(out bool gated)
@@ -316,6 +338,9 @@ public sealed unsafe class WebUiEvent
         return WebUiNativeLifetime.TryEnter(_generation);
     }
 
+    private static InvalidOperationException CreateAnsweredException()
+        => new("This WebUI event was already answered. WebUI releases an event once its reply is sent, so its arguments and client can no longer be reached; copy what you need before replying.");
+
     private static InvalidOperationException CreateAbandonedException()
         => new("WebUI is exiting or was cleaned and has released this event; its arguments and client can no longer be reached.");
 
@@ -327,7 +352,7 @@ public sealed unsafe class WebUiEvent
         }
     }
 
-    private readonly ref struct NativeScope(bool gated)
+    private readonly ref struct NativeScope(WebUiEvent owner, bool gated)
     {
         public void Dispose()
         {
@@ -335,6 +360,8 @@ public sealed unsafe class WebUiEvent
             {
                 WebUiNativeLifetime.Leave();
             }
+
+            Interlocked.Decrement(ref owner._accessors);
         }
     }
 }

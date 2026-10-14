@@ -87,7 +87,11 @@ waiting for replies that async bindings have not sent yet; WebUI answers those
 calls with an empty result and releases their events. CS-WebUI discards a reply
 that completes after that point instead of writing it into the released event,
 so shutting down with calls still pending is safe. Use `WebUiApplication.Exit`
-rather than the raw `WebUiNative.Exit`, which bypasses this protection.
+rather than the raw `WebUiNative.Exit`, which bypasses this protection; WebUI
+can also exit by itself after an internal failure, which CS-WebUI does not see.
+Once a reply has been sent, WebUI frees the event, so later event members throw
+`InvalidOperationException`. `Clean` waits up to 75 seconds for callbacks still
+running on other threads before WebUI frees its memory.
 
 `StartServer` asks the operating system for a free port unless `SetPort` chose
 one, and retries a few times with a new port if listening fails, so hosts
@@ -144,8 +148,16 @@ folder at the file's directory and shows the window in that browser kind, with
 no fallback. The file name must be one WebUI knows, such as `chromium`,
 `google-chrome`, `firefox` or `microsoft-edge-stable` on Linux, `chrome.exe` or
 `msedge.exe` on Windows, and `Chromium.app` on macOS; a wrapper script with such
-a name can add flags. WebUI itself reads no browser environment variable,
-including `WEBUI_BROWSER_PATH`. `WebUiWindow.ShowInBrowser` selects a browser
+a name can add flags. WebUI takes the first of its names for that browser that
+exists in the folder, so a folder holding both `chromium-browser` and `chromium`
+launches `chromium-browser`. The folder is set only while a window is shown,
+then restored to the one from `SetBrowserFolder`. WebUI starts the browser
+through the shell with the path in double quotes, so paths containing quotes,
+control characters, `$`, `` ` `` or `\` (and `%` on Windows) are rejected. If
+`CSWEBUI_BROWSER_PATH` cannot be used, `Show` throws, while `TryShow` returns
+`false` and reports the reason to the `SetLogger` logger and to `Trace`.
+WebUI itself reads no browser environment variable, including
+`WEBUI_BROWSER_PATH`. `WebUiWindow.ShowInBrowser` selects a browser
 kind, and `WebUiApplication.SetBrowserFolder` adds a folder that WebUI searches
 first while keeping its own order.
 

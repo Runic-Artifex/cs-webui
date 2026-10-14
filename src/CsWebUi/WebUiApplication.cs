@@ -11,11 +11,14 @@ public static class WebUiApplication
     /// <summary>The environment variable that selects the browser executable when <see cref="SetBrowserPath"/> was not called.</summary>
     public const string BrowserPathEnvironmentVariable = "CSWEBUI_BROWSER_PATH";
 
-    // WebUI's connection wait when no positive timeout is configured (WEBUI_DEF_TIMEOUT).
+    // WebUI's connection wait when no positive timeout is configured (WEBUI_DEF_TIMEOUT), and the
+    // largest timeout it accepts (WEBUI_MAX_TIMEOUT).
     private const int DefaultConnectionTimeoutSeconds = 15;
+    private const int MaximumConnectionTimeoutSeconds = 60;
 
     private static readonly TimeSpan AsyncWaitPollInterval = TimeSpan.FromMilliseconds(10);
     private static readonly object Gate = new();
+    private static readonly object BrowserFolderGate = new();
     private static Action<WebUiLogLevel, string>? _logger;
     private static int _asynchronousResponsesEnabled;
     private static long _connectionTimeoutSeconds;
@@ -42,13 +45,17 @@ public static class WebUiApplication
     /// <summary>Sets the maximum number of seconds WebUI waits for a client to connect.</summary>
     /// <remarks>
     /// WebUI also waits this long for a browser to connect when a window is shown; zero waits
-    /// forever for a connection in <see cref="Wait"/> and 15 seconds when showing.
+    /// forever for a connection in <see cref="Wait"/> and 15 seconds when showing. WebUI caps the
+    /// value at 60 seconds and ignores it after <see cref="Exit"/>.
     /// <see cref="WebUiWindow.StartServer"/> resets it to zero.
     /// </remarks>
     public static void SetConnectionTimeout(nuint seconds)
     {
         WebUiNative.SetTimeout(seconds);
-        Volatile.Write(ref _connectionTimeoutSeconds, (long)Math.Min(seconds, (nuint)int.MaxValue));
+        if (!WebUiNativeLifetime.IsExiting)
+        {
+            Volatile.Write(ref _connectionTimeoutSeconds, (long)Math.Min(seconds, (nuint)MaximumConnectionTimeoutSeconds));
+        }
     }
 
     /// <summary>Sets the folder in which WebUI first searches for browser executables.</summary>
@@ -57,16 +64,16 @@ public static class WebUiApplication
     /// <c>google-chrome</c> on Linux and <c>chrome.exe</c> on Windows, before its normal search.
     /// It still chooses the browser kind in its own order, so a Chrome on <c>PATH</c> is preferred
     /// over a Chromium in this folder. Use <see cref="SetBrowserPath"/> to choose one browser.
+    /// An empty path removes the folder.
     /// </remarks>
-    public static unsafe void SetBrowserFolder(string path)
+    public static void SetBrowserFolder(string path)
     {
-        var bytes = Utf8.Encode(path, nameof(path));
-        fixed (byte* value = bytes)
+        ArgumentNullException.ThrowIfNull(path);
+        lock (BrowserFolderGate)
         {
-            WebUiNative.SetBrowserFolder(value);
+            SetNativeBrowserFolder(path);
+            Volatile.Write(ref _browserFolder, path.Length == 0 ? null : path);
         }
-
-        Volatile.Write(ref _browserFolder, path);
     }
 
     /// <summary>Selects the browser executable that <see cref="WebUiWindow.Show"/> launches.</summary>
@@ -84,12 +91,23 @@ public static class WebUiApplication
     /// this browser and does not fall back to another browser or the WebView.
     /// </para>
     /// <para>
+    /// WebUI takes the first of its known names for that browser that exists in the folder, so a
+    /// folder with both <c>chromium-browser</c> and <c>chromium</c> launches <c>chromium-browser</c>.
+    /// The folder is set only while a window is being shown and then restored to the one from
+    /// <see cref="SetBrowserFolder"/>, if any. WebUI runs the browser through the shell
+    /// (<c>system()</c>) with the path in double quotes, so paths containing quotes, control
+    /// characters, <c>$</c>, <c>`</c> or <c>\</c> (and <c>%</c> on Windows) are rejected.
+    /// </para>
+    /// <para>
     /// Without this call, the <see cref="BrowserPathEnvironmentVariable"/> environment variable
     /// (<c>CSWEBUI_BROWSER_PATH</c>) is used the same way. WebUI itself does not read
     /// <c>WEBUI_BROWSER_PATH</c> or any other browser environment variable.
     /// </para>
     /// </remarks>
-    /// <exception cref="ArgumentException">The file does not exist or is not a browser WebUI can launch.</exception>
+    /// <exception cref="ArgumentException">
+    /// The file does not exist, is not a browser WebUI can launch, or contains characters that are
+    /// unsafe in a shell command.
+    /// </exception>
     public static void SetBrowserPath(string? path)
     {
         ConfiguredBrowser? configured = null;
@@ -153,11 +171,18 @@ public static class WebUiApplication
 
     /// <summary>Requests all WebUI windows to close.</summary>
     /// <remarks>
+    /// <para>
     /// WebUI stops waiting for replies that asynchronous bindings have not sent yet, and answers
     /// those calls with an empty result. From this call until <see cref="Clean"/>, a reply that an
     /// asynchronous binding completes later is discarded, and <see cref="WebUiEvent"/> members that
     /// reach the client throw <see cref="InvalidOperationException"/> outside the binding's
-    /// synchronous part. Calling the raw <c>WebUiNative.Exit</c> directly bypasses this protection.
+    /// synchronous part.
+    /// </para>
+    /// <para>
+    /// Calling the raw <c>WebUiNative.Exit</c> directly bypasses this protection. WebUI also exits by
+    /// itself after an internal failure (<c>_webui_panic</c>, for example when an allocation fails);
+    /// such an exit is not seen by CS-WebUI, and a later asynchronous reply is then unprotected.
+    /// </para>
     /// </remarks>
     public static void Exit() => WebUiNativeLifetime.Exit();
 
@@ -166,11 +191,23 @@ public static class WebUiApplication
 
     /// <summary>Releases WebUI's process-wide native resources.</summary>
     /// <remarks>
+    /// <para>
     /// Call this only after all <see cref="WebUiWindow"/> instances are disposed. Like
     /// <see cref="Exit"/>, it first stops replies from asynchronous bindings that are still
     /// pending; a window whose disposal is still deferred by such a binding is then released
     /// without touching the cleaned native state. WebUI can be used again afterwards, and its
     /// process-wide configuration starts from its defaults.
+    /// </para>
+    /// <para>
+    /// WebUI frees all native memory about two seconds after it exits, even while a binding or
+    /// file-handler callback is still running on one of its threads. Before that, this method
+    /// waits for callbacks running on other threads to return, for at most 75 seconds; a callback
+    /// still running after that is no longer protected and must not use its event. WebUI itself
+    /// releases each window about three seconds after exiting, even while its callbacks still run,
+    /// so a callback that runs that long can find its event's arguments gone. Called from
+    /// inside a callback, it only exits WebUI; call it again after <see cref="Wait"/> returns to
+    /// release the native state.
+    /// </para>
     /// </remarks>
     public static void Clean()
     {
@@ -210,6 +247,7 @@ public static class WebUiApplication
     internal static bool AsynchronousResponsesEnabled
         => Volatile.Read(ref _asynchronousResponsesEnabled) != 0;
 
+    /// <summary>Gets the folder set with <see cref="SetBrowserFolder"/>, if any.</summary>
     internal static string? BrowserFolder => Volatile.Read(ref _browserFolder);
 
     internal static TimeSpan ShowConnectionTimeout
@@ -223,32 +261,69 @@ public static class WebUiApplication
 
     internal static void ResetConnectionTimeoutMirror() => Volatile.Write(ref _connectionTimeoutSeconds, 0);
 
-    /// <summary>Gets the browser selected by <see cref="SetBrowserPath"/> or the environment, and points WebUI's browser folder at it.</summary>
-    /// <exception cref="WebUiException">The environment variable names a file WebUI cannot launch.</exception>
-    internal static ConfiguredBrowser? ApplyConfiguredBrowser()
+    /// <summary>Gets the browser selected by <see cref="SetBrowserPath"/> or the environment variable.</summary>
+    /// <returns><see langword="false"/> when the environment variable names a browser that cannot be used.</returns>
+    internal static bool TryGetConfiguredBrowser(out ConfiguredBrowser? configured, [System.Diagnostics.CodeAnalysis.NotNullWhen(false)] out string? error)
     {
-        ConfiguredBrowser? configured;
         lock (Gate)
         {
             configured = _browserPathSet ? _browserPath : null;
-            if (!_browserPathSet)
+            error = null;
+            if (_browserPathSet)
             {
-                var environment = Environment.GetEnvironmentVariable(BrowserPathEnvironmentVariable);
-                if (!string.IsNullOrWhiteSpace(environment)
-                    && !TryResolveBrowserPath(environment, out configured, out var error))
-                {
-                    throw new WebUiException(0, $"{BrowserPathEnvironmentVariable} is set, but it cannot be used. {error}");
-                }
+                return true;
             }
         }
 
-        if (configured is not null)
+        var environment = Environment.GetEnvironmentVariable(BrowserPathEnvironmentVariable);
+        if (string.IsNullOrWhiteSpace(environment) || TryResolveBrowserPath(environment, out configured, out error))
         {
-            // Re-applied on every show: the folder is process-wide and Clean resets it.
-            SetBrowserFolder(configured.Folder);
+            return true;
         }
 
-        return configured;
+        error = $"{BrowserPathEnvironmentVariable} is set, but it cannot be used. {error}";
+        return false;
+    }
+
+    /// <summary>Points WebUI's browser folder at a configured browser while showing a window.</summary>
+    internal static T WithBrowserFolder<T>(ConfiguredBrowser configured, Func<T> show)
+    {
+        lock (BrowserFolderGate)
+        {
+            SetNativeBrowserFolder(configured.Folder);
+            try
+            {
+                return show();
+            }
+            finally
+            {
+                // The folder is process-wide; restore the application's own choice.
+                SetNativeBrowserFolder(Volatile.Read(ref _browserFolder) ?? string.Empty);
+            }
+        }
+    }
+
+    /// <summary>Reports a configuration problem that a non-throwing method cannot raise.</summary>
+    internal static void ReportProblem(string message)
+    {
+        System.Diagnostics.Trace.TraceWarning("CsWebUi: " + message);
+        try
+        {
+            Volatile.Read(ref _logger)?.Invoke(WebUiLogLevel.Error, message);
+        }
+        catch
+        {
+            // A logger failure must not turn a Try method into a throwing one.
+        }
+    }
+
+    private static unsafe void SetNativeBrowserFolder(string path)
+    {
+        var bytes = Utf8.Encode(path, nameof(path));
+        fixed (byte* value = bytes)
+        {
+            WebUiNative.SetBrowserFolder(value);
+        }
     }
 
     internal static bool TryResolveBrowserPath(
@@ -270,6 +345,12 @@ public static class WebUiApplication
             return false;
         }
 
+        if (FindShellUnsafeCharacter(fullPath) is { } unsafeCharacter)
+        {
+            error = $"The browser path '{fullPath}' contains {unsafeCharacter}, which is unsafe in the shell command WebUI runs to start the browser.";
+            return false;
+        }
+
         var folder = Path.GetDirectoryName(fullPath);
         if (WebUiBrowserLocator.Identify(fullPath) is not { } browser || string.IsNullOrEmpty(folder))
         {
@@ -282,6 +363,29 @@ public static class WebUiApplication
         configured = new ConfiguredBrowser(fullPath, folder, browser);
         error = null;
         return true;
+    }
+
+    /// <summary>Describes a character that breaks out of WebUI's double-quoted shell argument, if any.</summary>
+    internal static string? FindShellUnsafeCharacter(string path)
+    {
+        foreach (var character in path)
+        {
+            if (char.IsControl(character))
+            {
+                return $"the control character U+{(int)character:X4}";
+            }
+
+            var unsafeCharacter = character == '"'
+                || (OperatingSystem.IsWindows()
+                    ? character == '%'
+                    : character is '$' or '`' or '\\');
+            if (unsafeCharacter)
+            {
+                return $"the character '{character}'";
+            }
+        }
+
+        return null;
     }
 
     internal static WebUiException CreateNativeException()

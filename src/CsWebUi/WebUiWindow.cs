@@ -16,7 +16,9 @@ public sealed unsafe class WebUiWindow : IDisposable
     // StartServer selects a free port itself and retries this often when listening fails (#18).
     private const int StartServerAttempts = 4;
 
-    private static readonly ConcurrentDictionary<nuint, WebUiWindow> Windows = new();
+    // Keyed by generation too: WebUI reuses window ids after WebUiApplication.Clean, while a window
+    // whose disposal a pending callback deferred can still be registered under its old id.
+    private static readonly ConcurrentDictionary<(int Generation, nuint Id), WebUiWindow> Windows = new();
     private static readonly byte[] FileHandlerFailureResponse = Encoding.ASCII.GetBytes(
         "HTTP/1.1 500 Internal Server Error\r\n" +
         "Content-Type: text/plain; charset=utf-8\r\n" +
@@ -33,7 +35,7 @@ public sealed unsafe class WebUiWindow : IDisposable
     private readonly object _lifecycleGate = new();
     private readonly CancellationTokenSource _shutdown = new();
     private readonly nuint _id;
-    private readonly int _generation = WebUiNativeLifetime.Generation;
+    private readonly int _generation;
     private FileHandlerRegistration? _fileHandler;
     private int _callbacksInFlight;
     private int _customPort;
@@ -45,7 +47,7 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// <summary>Creates a new WebUI window with an automatically allocated identifier.</summary>
     /// <exception cref="WebUiException">The native runtime could not allocate the window.</exception>
     public WebUiWindow()
-        : this(WebUiNative.NewWindow(), true)
+        : this(static () => WebUiNative.NewWindow())
     {
     }
 
@@ -53,19 +55,21 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="windowId"/> is zero.</exception>
     /// <exception cref="WebUiException">The requested identifier is already in use or could not be allocated.</exception>
     public WebUiWindow(nuint windowId)
-        : this(CreateWithId(windowId), true)
+        : this(CreateWithId(windowId))
     {
     }
 
-    private WebUiWindow(nuint id, bool _)
+    private WebUiWindow(Func<nuint> create)
     {
+        // Created atomically with WebUiApplication.Clean, so the generation matches the native window.
+        var id = WebUiNativeLifetime.CreateWindow(create, out _generation);
         if (id == 0)
         {
             throw WebUiApplication.CreateNativeException();
         }
 
         _id = id;
-        if (!Windows.TryAdd(id, this))
+        if (!Windows.TryAdd((_generation, id), this))
         {
             WebUiNative.Destroy(id);
             throw new InvalidOperationException($"A managed WebUI window with id {id} already exists.");
@@ -172,45 +176,72 @@ public sealed unsafe class WebUiWindow : IDisposable
     public void Show(string content)
     {
         ThrowIfDisposed();
-        var configured = WebUiApplication.ApplyConfiguredBrowser();
+        if (!WebUiApplication.TryGetConfiguredBrowser(out var configured, out var error))
+        {
+            throw new WebUiException(0, error);
+        }
+
         var requested = configured?.Browser ?? WebUiBrowser.AnyBrowser;
         var started = Stopwatch.GetTimestamp();
-        var shown = configured is null ? ShowNative(content) : ShowInBrowserNative(content, requested);
-        if (!shown)
+        if (!ShowWith(content, configured, requested))
         {
-            throw CreateShowException(requested, Stopwatch.GetElapsedTime(started), configured?.Path);
+            throw CreateShowException(requested, Stopwatch.GetElapsedTime(started), configured);
         }
     }
 
     /// <summary>Attempts to show HTML content, a local file, or a URL using WebUI's recommended browser.</summary>
-    /// <remarks>Honors <see cref="WebUiApplication.SetBrowserPath"/> and <c>CSWEBUI_BROWSER_PATH</c> like <see cref="Show"/>.</remarks>
+    /// <remarks>
+    /// Honors <see cref="WebUiApplication.SetBrowserPath"/> and <c>CSWEBUI_BROWSER_PATH</c> like
+    /// <see cref="Show"/>. When the environment variable names a browser that cannot be used, this
+    /// returns <see langword="false"/> and reports the reason to the logger set with
+    /// <see cref="WebUiApplication.SetLogger"/> and to <see cref="System.Diagnostics.Trace"/>.
+    /// </remarks>
     public bool TryShow(string content)
     {
         ThrowIfDisposed();
-        var configured = WebUiApplication.ApplyConfiguredBrowser();
-        return configured is null ? ShowNative(content) : ShowInBrowserNative(content, configured.Browser);
+        if (!WebUiApplication.TryGetConfiguredBrowser(out var configured, out var error))
+        {
+            WebUiApplication.ReportProblem(error);
+            return false;
+        }
+
+        return ShowWith(content, configured, configured?.Browser ?? WebUiBrowser.AnyBrowser);
     }
 
     /// <summary>Shows HTML content, a local file, or a URL in a selected browser.</summary>
+    /// <remarks>
+    /// When <paramref name="browser"/> is the kind selected with
+    /// <see cref="WebUiApplication.SetBrowserPath"/> or <c>CSWEBUI_BROWSER_PATH</c>, that executable is used.
+    /// </remarks>
     /// <exception cref="WebUiShowException">WebUI could not show the window in that browser.</exception>
     public void ShowInBrowser(string content, WebUiBrowser browser)
     {
         ThrowIfDisposed();
-        var configured = WebUiApplication.ApplyConfiguredBrowser();
-        var started = Stopwatch.GetTimestamp();
-        if (!ShowInBrowserNative(content, browser))
+        if (!WebUiApplication.TryGetConfiguredBrowser(out var configured, out var error))
         {
-            var path = configured is not null && configured.Browser == browser ? configured.Path : null;
-            throw CreateShowException(browser, Stopwatch.GetElapsedTime(started), path);
+            throw new WebUiException(0, error);
+        }
+
+        var matching = configured is not null && configured.Browser == browser ? configured : null;
+        var started = Stopwatch.GetTimestamp();
+        if (!ShowWith(content, matching, browser))
+        {
+            throw CreateShowException(browser, Stopwatch.GetElapsedTime(started), matching);
         }
     }
 
     /// <summary>Attempts to show HTML content, a local file, or a URL in a selected browser.</summary>
+    /// <remarks>Reports an unusable <c>CSWEBUI_BROWSER_PATH</c> like <see cref="TryShow"/>.</remarks>
     public bool TryShowInBrowser(string content, WebUiBrowser browser)
     {
         ThrowIfDisposed();
-        WebUiApplication.ApplyConfiguredBrowser();
-        return ShowInBrowserNative(content, browser);
+        if (!WebUiApplication.TryGetConfiguredBrowser(out var configured, out var error))
+        {
+            WebUiApplication.ReportProblem(error);
+            return false;
+        }
+
+        return ShowWith(content, configured is not null && configured.Browser == browser ? configured : null, browser);
     }
 
     /// <summary>Shows HTML content, a local file, or a URL in an embedded WebView.</summary>
@@ -230,34 +261,47 @@ public sealed unsafe class WebUiWindow : IDisposable
     {
         ThrowIfDisposed();
         var bytes = Utf8.Encode(content, nameof(content));
-        Volatile.Write(ref _serverRequested, 1);
         fixed (byte* value = bytes)
         {
-            return WebUiNative.ShowWebView(_id, value) != 0;
+            return MarkServerStarted(WebUiNative.ShowWebView(_id, value) != 0);
         }
     }
 
-    private bool ShowNative(string content)
+    private bool ShowWith(string content, ConfiguredBrowser? configured, WebUiBrowser browser)
     {
         var bytes = Utf8.Encode(content, nameof(content));
-        Volatile.Write(ref _serverRequested, 1);
-        fixed (byte* value = bytes)
+        if (configured is not null)
         {
-            return WebUiNative.Show(_id, value) != 0;
+            return WebUiApplication.WithBrowserFolder(configured, () => ShowNative(bytes, browser));
         }
+
+        return ShowNative(bytes, browser);
     }
 
-    private bool ShowInBrowserNative(string content, WebUiBrowser browser)
+    private bool ShowNative(byte[] content, WebUiBrowser browser)
     {
-        var bytes = Utf8.Encode(content, nameof(content));
-        Volatile.Write(ref _serverRequested, 1);
-        fixed (byte* value = bytes)
+        fixed (byte* value = content)
         {
-            return WebUiNative.ShowBrowser(_id, value, (nuint)browser) != 0;
+            var shown = browser == WebUiBrowser.AnyBrowser
+                ? WebUiNative.Show(_id, value) != 0
+                : WebUiNative.ShowBrowser(_id, value, (nuint)browser) != 0;
+            return MarkServerStarted(shown);
         }
     }
 
-    private WebUiShowException CreateShowException(WebUiBrowser requested, TimeSpan elapsed, string? configuredPath)
+    // A later StartServer must not move a running server to another port, but after a failed
+    // show it may still pick a port itself.
+    private bool MarkServerStarted(bool started)
+    {
+        if (started)
+        {
+            Volatile.Write(ref _serverRequested, 1);
+        }
+
+        return started;
+    }
+
+    private WebUiShowException CreateShowException(WebUiBrowser requested, TimeSpan elapsed, ConfiguredBrowser? configured)
     {
         var tried = requested;
         if (requested == WebUiBrowser.AnyBrowser)
@@ -266,10 +310,12 @@ public sealed unsafe class WebUiWindow : IDisposable
             tried = (WebUiBrowser)(uint)WebUiNative.GetBestBrowser(_id);
         }
 
-        var path = configuredPath;
-        if (path is null && tried is not (WebUiBrowser.AnyBrowser or WebUiBrowser.ChromiumBased or WebUiBrowser.WebView))
+        string? path = null;
+        if (tried is not (WebUiBrowser.AnyBrowser or WebUiBrowser.ChromiumBased or WebUiBrowser.WebView))
         {
-            path = WebUiBrowserLocator.Find(tried, WebUiApplication.BrowserFolder);
+            // WebUI takes the first of its names that exists in the folder, which may not be the
+            // configured file itself.
+            path = WebUiBrowserLocator.Find(tried, configured?.Folder ?? WebUiApplication.BrowserFolder);
         }
 
         return BuildShowException(_id, requested, tried, path, elapsed, WebUiApplication.ShowConnectionTimeout, HasDisplay());
@@ -311,7 +357,8 @@ public sealed unsafe class WebUiWindow : IDisposable
         {
             var name = WebUiBrowserLocator.DisplayName(tried);
             var where = browserPath is null ? string.Empty : $" ({browserPath})";
-            if (elapsed >= connectionTimeout - TimeSpan.FromSeconds(1))
+            // WebUI waits the whole timeout for a started browser; a launch failure returns at once.
+            if (elapsed >= connectionTimeout * 0.9)
             {
                 failure = WebUiShowFailure.NotConnected;
                 message.Append(invariant, $"it started {name}{where}, but the page did not connect within {connectionTimeout.TotalSeconds:0} s.");
@@ -330,7 +377,7 @@ public sealed unsafe class WebUiWindow : IDisposable
 
         if (!hasDisplay)
         {
-            message.Append(" No display is available: DISPLAY and WAYLAND_DISPLAY are not set.");
+            message.Append(" No display is available: DISPLAY and WAYLAND_DISPLAY are not set, and there is no default Wayland socket.");
         }
 
         if (tried != WebUiBrowser.WebView)
@@ -347,9 +394,22 @@ public sealed unsafe class WebUiWindow : IDisposable
     }
 
     private static bool HasDisplay()
-        => !OperatingSystem.IsLinux() && !OperatingSystem.IsFreeBSD()
-            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
-            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"));
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsFreeBSD())
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DISPLAY"))
+            || !string.IsNullOrEmpty(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+        {
+            return true;
+        }
+
+        // libwayland connects to $XDG_RUNTIME_DIR/wayland-0 when WAYLAND_DISPLAY is unset.
+        var runtimeDirectory = Environment.GetEnvironmentVariable("XDG_RUNTIME_DIR");
+        return !string.IsNullOrEmpty(runtimeDirectory) && File.Exists(Path.Combine(runtimeDirectory, "wayland-0"));
+    }
 
     /// <summary>Starts the local WebUI server without launching a browser.</summary>
     /// <returns>The absolute URL of the started server.</returns>
@@ -370,9 +430,9 @@ public sealed unsafe class WebUiWindow : IDisposable
         var bytes = Utf8.Encode(content, nameof(content));
         for (var attempt = 1; ; attempt++)
         {
-            var selectedPort = Volatile.Read(ref _customPort) == 0
-                && Volatile.Read(ref _serverRequested) == 0
-                && TrySelectFreePort();
+            var selectedPort = Volatile.Read(ref _customPort) == 0 && Volatile.Read(ref _serverRequested) == 0
+                ? TrySelectFreePort()
+                : 0;
             string? result;
             fixed (byte* value = bytes)
             {
@@ -387,14 +447,21 @@ public sealed unsafe class WebUiWindow : IDisposable
                 return result!;
             }
 
-            if (!selectedPort || attempt == StartServerAttempts)
+            // Retry only a collision on the port this method chose: not after Exit, and not when the
+            // port is still free, which means the failure had another cause.
+            if (selectedPort == 0
+                || attempt == StartServerAttempts
+                || WebUiNativeLifetime.IsExiting
+                || !IsPortTaken(selectedPort))
             {
                 return RequireServerUrl(result, _id, WebUiApplication.ReadNativeError);
             }
         }
     }
 
-    private bool TrySelectFreePort()
+    /// <summary>Gives WebUI a free port chosen by the operating system.</summary>
+    /// <returns>The port, or zero when none could be set.</returns>
+    private int TrySelectFreePort()
     {
         // WebUI draws ports from rand() seeded with the current second, so processes started in
         // the same second try the same ports and all but one fail to listen (#18). The operating
@@ -409,10 +476,25 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
         catch (SocketException)
         {
-            return false;
+            return 0;
         }
 
-        return WebUiNative.SetPort(_id, (nuint)port) != 0;
+        return WebUiNative.SetPort(_id, (nuint)port) != 0 ? port : 0;
+    }
+
+    private static bool IsPortTaken(int port)
+    {
+        try
+        {
+            using var listener = new TcpListener(IPAddress.Loopback, port);
+            listener.Start();
+            listener.Stop();
+            return false;
+        }
+        catch (SocketException)
+        {
+            return true;
+        }
     }
 
     private static bool IsServerUrl(string? url)
@@ -791,10 +873,10 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// <summary>Gets whether the current thread is running a native binding callback.</summary>
     internal static bool IsDispatchingOnCurrentThread => t_dispatchDepth > 0;
 
-    private static nuint CreateWithId(nuint windowId)
+    private static Func<nuint> CreateWithId(nuint windowId)
     {
         ArgumentOutOfRangeException.ThrowIfZero(windowId);
-        return WebUiNative.NewWindowId(windowId);
+        return () => WebUiNative.NewWindowId(windowId);
     }
 
     private WebUiBinding BindCore(string element, BindingRegistration registration)
@@ -831,7 +913,7 @@ public sealed unsafe class WebUiWindow : IDisposable
             return;
         }
 
-        if (!Windows.TryGetValue(nativeEvent->Window, out var window))
+        if (!Windows.TryGetValue((WebUiNativeLifetime.Generation, nativeEvent->Window), out var window))
         {
             CompleteRefusedEvent(nativeEvent);
             return;
@@ -851,9 +933,11 @@ public sealed unsafe class WebUiWindow : IDisposable
         *length = 0;
         WebUiWindow? window = null;
         var callbackStarted = false;
+        t_dispatchDepth++;
+        WebUiNativeLifetime.EnterDispatch();
         try
         {
-            if (!Windows.TryGetValue(windowId, out window)
+            if (!Windows.TryGetValue((WebUiNativeLifetime.Generation, windowId), out window)
                 || !window.TryBeginCallback())
             {
                 CompleteNotHandledFileResponse(windowId);
@@ -913,6 +997,9 @@ public sealed unsafe class WebUiWindow : IDisposable
             {
                 window!.EndCallback();
             }
+
+            WebUiNativeLifetime.LeaveDispatch();
+            t_dispatchDepth--;
         }
     }
 
@@ -981,6 +1068,7 @@ public sealed unsafe class WebUiWindow : IDisposable
 
         WebUiEvent? webUiEvent = null;
         t_dispatchDepth++;
+        WebUiNativeLifetime.EnterDispatch();
         try
         {
             webUiEvent = new WebUiEvent(this, nativeEvent);
@@ -1011,6 +1099,7 @@ public sealed unsafe class WebUiWindow : IDisposable
             // The native callback returns now. Its event stays valid only while WebUI waits for
             // an asynchronous reply, which it stops doing when the application exits.
             webUiEvent?.EndDispatch();
+            WebUiNativeLifetime.LeaveDispatch();
             t_dispatchDepth--;
         }
     }
@@ -1095,7 +1184,7 @@ public sealed unsafe class WebUiWindow : IDisposable
             return;
         }
 
-        Windows.TryRemove(new KeyValuePair<nuint, WebUiWindow>(_id, this));
+        Windows.TryRemove(new KeyValuePair<(int, nuint), WebUiWindow>((_generation, _id), this));
         WebUiNativeLifetime.Destroy(_id, _generation);
 
         Volatile.Write(ref _fileHandler, null);

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using CsWebUi.Native;
 
 namespace CsWebUi.Internal;
@@ -15,21 +16,38 @@ namespace CsWebUi.Internal;
 /// freed event memory (runic-sdk#239).
 /// </para>
 /// <para>
-/// Access from the thread that is still running the native callback is always safe. Every other
-/// access enters this gate. Exit and clean close the gate and wait for the accesses already inside
-/// it before calling native code, so no access can overlap the moment WebUI abandons its events.
-/// A clean starts a new generation; events and windows from an earlier generation never touch
-/// native state again.
+/// Access from the thread that is still running the native callback is safe until WebUI frees its
+/// state. Every other access enters this gate. Exit and clean close the gate and wait for the
+/// accesses already inside it before calling native code, so no access can overlap the moment WebUI
+/// abandons its events. Clean additionally waits for callbacks still running on other threads,
+/// because <c>webui_clean()</c> frees all native memory about two seconds after it exits. A clean
+/// starts a new generation; events and windows from an earlier generation never touch native state
+/// again.
+/// </para>
+/// <para>
+/// Both waits are bounded by <see cref="WaitLimit"/>: a gated call such as
+/// <c>webui_show_client</c> can block for up to WebUI's 60-second connection timeout, and a
+/// callback can block for as long as the application's code does. When the limit passes, the
+/// transition proceeds and a warning is traced; an access still in progress at that point is not
+/// protected. WebUI can also call <c>webui_exit()</c> itself, from <c>_webui_panic</c> after an
+/// internal failure such as an allocation failure; that exit bypasses this gate.
 /// </para>
 /// </remarks>
 internal static class WebUiNativeLifetime
 {
+    /// <summary>WebUI's longest connection timeout (WEBUI_MAX_TIMEOUT) plus a margin.</summary>
+    internal static readonly TimeSpan WaitLimit = TimeSpan.FromSeconds(75);
+
     private static readonly object TransitionGate = new();
     private static int _generation;
     private static int _closed;
     private static int _accessors;
+    private static int _dispatches;
 
     internal static int Generation => Volatile.Read(ref _generation);
+
+    /// <summary>Gets whether Exit or Clean has stopped native event access in the current generation.</summary>
+    internal static bool IsExiting => Volatile.Read(ref _closed) != 0;
 
     /// <summary>Enters the gate when native state from <paramref name="generation"/> is still live.</summary>
     internal static bool TryEnter(int generation)
@@ -48,6 +66,21 @@ internal static class WebUiNativeLifetime
     }
 
     internal static void Leave() => Interlocked.Decrement(ref _accessors);
+
+    /// <summary>Counts a managed callback that runs inside a native WebUI callback.</summary>
+    internal static void EnterDispatch() => Interlocked.Increment(ref _dispatches);
+
+    internal static void LeaveDispatch() => Interlocked.Decrement(ref _dispatches);
+
+    /// <summary>Creates a native window and returns it with its generation, atomically with Clean.</summary>
+    internal static nuint CreateWindow(Func<nuint> create, out int generation)
+    {
+        lock (TransitionGate)
+        {
+            generation = Volatile.Read(ref _generation);
+            return create();
+        }
+    }
 
     /// <summary>Stops native event access, then asks WebUI to exit.</summary>
     internal static void Exit()
@@ -76,20 +109,35 @@ internal static class WebUiNativeLifetime
 
     /// <summary>Stops native event access, releases WebUI's native state and starts a new generation.</summary>
     /// <param name="insideCallback">
-    /// The caller is running inside a native callback. WebUI then only exits and defers its
-    /// cleanup, so the current generation stays closed until a later clean.
+    /// The caller is running inside a native callback. WebUI then only exits; the current
+    /// generation stays closed until a later clean from outside a callback.
     /// </param>
     internal static void Clean(bool insideCallback)
     {
         lock (TransitionGate)
         {
             Close();
-            WebUiNative.Clean();
             if (insideCallback)
             {
+                // Freeing native state now would pull it from under the running callback.
+                // webui_clean() itself only exits inside a binding callback, but not inside a
+                // file-handler callback, so exit explicitly in both cases.
+                WebUiNative.Exit();
                 return;
             }
 
+            // Exit first so WebUI starts no new callbacks.
+            WebUiNative.Exit();
+        }
+
+        // Let the callbacks already running on other threads leave native code before
+        // webui_clean() frees it. This waits outside the lock, so a callback that calls Exit
+        // or Clean itself does not block on it.
+        WaitUntilZero(ref _dispatches, "managed callbacks still running");
+
+        lock (TransitionGate)
+        {
+            WebUiNative.Clean();
             Interlocked.Increment(ref _generation);
             Interlocked.Exchange(ref _closed, 0);
         }
@@ -98,9 +146,27 @@ internal static class WebUiNativeLifetime
     private static void Close()
     {
         Interlocked.Exchange(ref _closed, 1);
-        var spinner = default(SpinWait);
-        while (Volatile.Read(ref _accessors) != 0)
+        WaitUntilZero(ref _accessors, "native event calls still in progress");
+    }
+
+    private static void WaitUntilZero(ref int counter, string what)
+    {
+        if (Volatile.Read(ref counter) == 0)
         {
+            return;
+        }
+
+        var started = Stopwatch.GetTimestamp();
+        var spinner = default(SpinWait);
+        while (Volatile.Read(ref counter) != 0)
+        {
+            if (Stopwatch.GetElapsedTime(started) > WaitLimit)
+            {
+                Trace.TraceWarning(
+                    $"CsWebUi: WebUI exit or clean proceeds after waiting {WaitLimit.TotalSeconds:0} s for {Volatile.Read(ref counter)} {what}; they are no longer protected.");
+                return;
+            }
+
             spinner.SpinOnce();
         }
     }

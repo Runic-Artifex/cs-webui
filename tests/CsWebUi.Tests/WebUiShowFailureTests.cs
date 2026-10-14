@@ -144,4 +144,77 @@ public sealed class WebUiShowFailureTests
             folder.Delete(recursive: true);
         }
     }
+
+    [Theory]
+    [InlineData(0.95, WebUiShowFailure.NotConnected)]
+    [InlineData(0.1, WebUiShowFailure.BrowserNotStarted)]
+    public void OneSecondTimeoutsAreClassifiedByElapsedTime(double elapsedSeconds, WebUiShowFailure expected)
+    {
+        var exception = WebUiWindow.BuildShowException(
+            5, WebUiBrowser.Chromium, WebUiBrowser.Chromium, null, TimeSpan.FromSeconds(elapsedSeconds), TimeSpan.FromSeconds(1), hasDisplay: true);
+
+        Assert.Equal(expected, exception.Failure);
+    }
+
+    [Theory]
+    [InlineData("/opt/chrome\"bin/chromium")]
+    [InlineData("/opt/chrome\nbin/chromium")]
+    public void ShellBreakingCharactersAreFoundOnEveryPlatform(string path)
+        => Assert.NotNull(WebUiApplication.FindShellUnsafeCharacter(path));
+
+    [Fact]
+    public void ShellUnsafeBrowserPathsAreRejected()
+    {
+        var unsafeName = OperatingSystem.IsWindows() ? "cswebui-%PATH%-" : "cswebui-$(id)-";
+        var folder = Directory.CreateTempSubdirectory(unsafeName);
+        try
+        {
+            var name = WebUiBrowserLocator.GetFolderNames(WebUiBrowser.Firefox)[0];
+            var path = Path.Combine(folder.FullName, name);
+            if (OperatingSystem.IsMacOS())
+            {
+                Directory.CreateDirectory(path);
+            }
+            else
+            {
+                File.WriteAllText(path, string.Empty);
+            }
+
+            Assert.False(WebUiApplication.TryResolveBrowserPath(path, out _, out var error));
+            Assert.Contains("unsafe in the shell command", error);
+            var argument = Assert.Throws<ArgumentException>(() => WebUiApplication.SetBrowserPath(path));
+            Assert.Contains("unsafe", argument.Message);
+        }
+        finally
+        {
+            folder.Delete(recursive: true);
+        }
+    }
+
+    [NativeFact]
+    public void TryShowReportsAnUnusableBrowserVariableInsteadOfThrowing()
+    {
+        var previous = Environment.GetEnvironmentVariable(WebUiApplication.BrowserPathEnvironmentVariable);
+        var reported = new List<string>();
+        Environment.SetEnvironmentVariable(
+            WebUiApplication.BrowserPathEnvironmentVariable,
+            Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"), "chromium"));
+        WebUiApplication.SetBrowserPath(null);
+        WebUiApplication.SetLogger((_, message) => reported.Add(message));
+        try
+        {
+            using var window = new WebUiWindow();
+
+            Assert.False(window.TryShow("<html></html>"));
+            Assert.False(window.TryShowInBrowser("<html></html>", WebUiBrowser.Chromium));
+            Assert.Contains(reported, message => message.Contains("CSWEBUI_BROWSER_PATH is set, but it cannot be used", StringComparison.Ordinal));
+            var exception = Assert.Throws<WebUiException>(() => window.Show("<html></html>"));
+            Assert.Contains("does not exist", exception.Message);
+        }
+        finally
+        {
+            WebUiApplication.SetLogger(null);
+            Environment.SetEnvironmentVariable(WebUiApplication.BrowserPathEnvironmentVariable, previous);
+        }
+    }
 }
