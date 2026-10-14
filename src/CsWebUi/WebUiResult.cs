@@ -27,9 +27,22 @@ public readonly struct WebUiResult
     public static WebUiResult FromBoolean(bool value) => new(WebUiResultKind.Boolean, value);
 
     /// <summary>Creates a UTF-8 string response.</summary>
-    public static WebUiResult FromString(string? value) => new(WebUiResultKind.String, value ?? string.Empty);
+    /// <exception cref="ArgumentException">
+    /// <paramref name="value"/> contains a null character. WebUI sends a reply as a C string, which
+    /// would end there.
+    /// </exception>
+    public static WebUiResult FromString(string? value)
+    {
+        if (value is not null && value.Contains('\0'))
+        {
+            throw new ArgumentException("Embedded null characters are not supported by the WebUI C string API.", nameof(value));
+        }
+
+        return new(WebUiResultKind.String, value ?? string.Empty);
+    }
 
     /// <summary>Creates a string result implicitly.</summary>
+    /// <exception cref="ArgumentException"><paramref name="value"/> contains a null character.</exception>
     public static implicit operator WebUiResult(string value) => FromString(value);
 
     /// <summary>Creates an integer result implicitly.</summary>

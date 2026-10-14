@@ -303,7 +303,8 @@ nix flake check
 - Both packages are trimming- and NativeAOT-oriented. The high-level callback dispatcher has no reflection-based registration.
 - The high-level API parses JavaScript numeric arguments and serializes double results with the invariant culture, avoiding process-locale differences in WebUI's raw float helpers.
 - Empty high-level callback results complete correctly when async bindings are present; before WebUI `4e65ad711`, its direct empty-string helper left that response pending.
-- Strings passed to WebUI reject embedded null characters instead of silently truncating at the native C-string boundary.
+- Strings passed to WebUI are null-terminated UTF-8 and reject embedded null characters, including binding results, instead of silently truncating at the native C-string boundary. `SetBrowserFolder` also rejects the characters `SetBrowserPath` rejects, because WebUI runs a browser found there through the shell.
+- `WebUiEvent` reads arguments with the byte length WebUI received, so a null character sent from JavaScript is preserved. `ExecuteJavaScript` results are C strings and end at their first null character.
 - WebUI owns pointers returned from event accessors and other borrowed APIs. The safe `WebUiEvent` wrapper invalidates access after the callback completes.
 - Browser mode needs an installed browser. Embedded WebView mode has platform dependencies, including the WebView2 runtime/loader on Windows and GTK/WebKit on Linux.
 

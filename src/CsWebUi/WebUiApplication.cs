@@ -60,15 +60,32 @@ public static class WebUiApplication
 
     /// <summary>Sets the folder in which WebUI first searches for browser executables.</summary>
     /// <remarks>
+    /// <para>
     /// WebUI looks in this folder for its known executable names, such as <c>chromium</c> or
     /// <c>google-chrome</c> on Linux and <c>chrome.exe</c> on Windows, before its normal search.
     /// It still chooses the browser kind in its own order, so a Chrome on <c>PATH</c> is preferred
     /// over a Chromium in this folder. Use <see cref="SetBrowserPath"/> to choose one browser.
     /// An empty path removes the folder.
+    /// </para>
+    /// <para>
+    /// WebUI starts a browser it finds there through the shell (<c>system()</c>), with the path in
+    /// double quotes, so the same characters as for <see cref="SetBrowserPath"/> are rejected.
+    /// </para>
     /// </remarks>
+    /// <exception cref="ArgumentException">
+    /// The path contains a null or other control character, a double quote, or a character the
+    /// shell expands inside double quotes.
+    /// </exception>
     public static void SetBrowserFolder(string path)
     {
         ArgumentNullException.ThrowIfNull(path);
+        if (FindShellUnsafeCharacter(path) is { } unsafeCharacter)
+        {
+            throw new ArgumentException(
+                $"The browser folder contains {unsafeCharacter}, which is unsafe in the shell command WebUI runs to start the browser.",
+                nameof(path));
+        }
+
         lock (BrowserFolderGate)
         {
             SetNativeBrowserFolder(path);
@@ -335,6 +352,13 @@ public static class WebUiApplication
         if (string.IsNullOrWhiteSpace(path))
         {
             error = "The browser path is empty.";
+            return false;
+        }
+
+        // Path.GetFullPath throws for a null character instead of reporting it.
+        if (path.Contains('\0'))
+        {
+            error = "The browser path contains the control character U+0000, which would end it early in WebUI's C string.";
             return false;
         }
 

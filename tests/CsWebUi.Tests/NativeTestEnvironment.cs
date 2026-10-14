@@ -29,3 +29,14 @@ internal sealed class NativeFactAttribute : FactAttribute
         }
     }
 }
+
+internal sealed class NativeTheoryAttribute : TheoryAttribute
+{
+    public NativeTheoryAttribute()
+    {
+        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("CSWEBUI_NATIVE_LIBRARY")))
+        {
+            Skip = NativeTestEnvironment.MissingLibraryReason;
+        }
+    }
+}

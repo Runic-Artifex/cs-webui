@@ -1,3 +1,4 @@
+using System.Text;
 using CsWebUi.Internal;
 using CsWebUi.Native;
 
@@ -15,6 +16,9 @@ namespace CsWebUi;
 /// </remarks>
 public sealed unsafe class WebUiEvent
 {
+    /// <summary>WebUI's WEBUI_MAX_BUF: the largest argument webui_get_string_at() returns.</summary>
+    private const nuint MaxArgumentBytes = 64_000_000;
+
     private readonly WebUiWindow _window;
     private readonly WebUiEventNative* _nativeEvent;
     private readonly int _generation;
@@ -84,8 +88,7 @@ public sealed unsafe class WebUiEvent
     public long GetInt64(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-        return WebUiArgumentParser.ParseInt64(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
+        return WebUiArgumentParser.ParseInt64(ReadStringArgument(index));
     }
 
     /// <summary>Gets an argument as a double-precision floating-point number.</summary>
@@ -93,8 +96,7 @@ public sealed unsafe class WebUiEvent
     public double GetDouble(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-        return WebUiArgumentParser.ParseDouble(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
+        return WebUiArgumentParser.ParseDouble(ReadStringArgument(index));
     }
 
     /// <summary>Gets an argument as a Boolean value.</summary>
@@ -102,34 +104,25 @@ public sealed unsafe class WebUiEvent
     public bool GetBoolean(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-        return WebUiArgumentParser.ParseBoolean(Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index)));
+        return WebUiArgumentParser.ParseBoolean(ReadStringArgument(index));
     }
 
     /// <summary>Gets an argument as a UTF-8 string.</summary>
+    /// <remarks>
+    /// The string is read with the byte length WebUI received, so null characters sent by
+    /// JavaScript are preserved rather than ending the string early.
+    /// </remarks>
     public string GetString(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-        return Utf8.DecodeRequired(WebUiNative.GetStringAt(_nativeEvent, index));
+        return ReadStringArgument(index);
     }
 
     /// <summary>Copies an argument's raw bytes into managed memory.</summary>
     public byte[] GetBytes(nuint index = 0)
     {
         using var scope = EnterNative();
-        ValidateArgumentIndex(index);
-
-        var size = WebUiNative.GetSizeAt(_nativeEvent, index);
-        if (size > int.MaxValue)
-        {
-            throw new InvalidOperationException("The WebUI argument is too large for a managed array.");
-        }
-
-        var source = WebUiNative.GetStringAt(_nativeEvent, index);
-        return source is null || size == 0
-            ? []
-            : new ReadOnlySpan<byte>(source, checked((int)size)).ToArray();
+        return ReadArgument(index).ToArray();
     }
 
     /// <summary>Sends JavaScript to only the client that raised this event.</summary>
@@ -298,9 +291,23 @@ public sealed unsafe class WebUiEvent
         }
     }
 
-    private void ValidateArgumentIndex(nuint index)
+    private string ReadStringArgument(nuint index) => Encoding.UTF8.GetString(ReadArgument(index));
+
+    /// <summary>Gets an argument's bytes, bounded by the size WebUI received; valid inside a native scope.</summary>
+    private ReadOnlySpan<byte> ReadArgument(nuint index)
     {
         ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, WebUiNative.GetCount(_nativeEvent), nameof(index));
+
+        // webui_get_string_at() returns a static empty string instead of the data when the size
+        // exceeds WEBUI_MAX_BUF, so the size alone does not bound what the pointer refers to.
+        var size = WebUiNative.GetSizeAt(_nativeEvent, index);
+        if (size == 0 || size > MaxArgumentBytes)
+        {
+            return [];
+        }
+
+        var source = WebUiNative.GetStringAt(_nativeEvent, index);
+        return source is null ? [] : new ReadOnlySpan<byte>(source, (int)size);
     }
 
     private NativeScope EnterNative()

@@ -57,6 +57,13 @@ unsafe
 }
 ```
 
+Every `byte*` string parameter must point to null-terminated UTF-8: WebUI
+reads it with `strlen`. The span of a `"..."u8` literal excludes the terminator
+the compiler places after it, and a slice of any buffer is not terminated, so
+include `\0` in the literal as above or copy the bytes into a terminated
+buffer. An embedded null character ends the string early. Length-based
+parameters, such as `SendRaw`'s `size`, must match the buffer.
+
 WebUI owns pointers it returns unless the upstream API explicitly requires
 `WebUiNative.Free`. Keep callbacks and any memory passed across the ABI valid
 for the lifetime WebUI requires; this package intentionally does not add the
