@@ -20,13 +20,18 @@ public sealed unsafe class WebUiWindow : IDisposable
         "\r\n" +
         "Internal Server Error");
 
+    [ThreadStatic]
+    private static int t_dispatchDepth;
+
     private readonly ConcurrentDictionary<nuint, BindingRegistration> _bindings = new();
     private readonly object _lifecycleGate = new();
     private readonly CancellationTokenSource _shutdown = new();
     private readonly nuint _id;
+    private readonly int _generation = WebUiNativeLifetime.Generation;
     private FileHandlerRegistration? _fileHandler;
     private int _callbacksInFlight;
     private int _disposeRequested;
+    private int _shutdownCancelled;
     private int _destroyed;
 
     /// <summary>Creates a new WebUI window with an automatically allocated identifier.</summary>
@@ -574,12 +579,25 @@ public sealed unsafe class WebUiWindow : IDisposable
             _bindings.Clear();
         }
 
-        _shutdown.Cancel();
-        TryDestroy();
+        try
+        {
+            _shutdown.Cancel();
+        }
+        finally
+        {
+            // A callback that ends meanwhile defers destruction to this call, so the token
+            // source is not disposed while it is being cancelled.
+            Interlocked.Exchange(ref _shutdownCancelled, 1);
+            TryDestroy();
+        }
+
         GC.SuppressFinalize(this);
     }
 
     internal void RemoveBinding(nuint id) => _bindings.TryRemove(id, out _);
+
+    /// <summary>Gets whether the current thread is running a native binding callback.</summary>
+    internal static bool IsDispatchingOnCurrentThread => t_dispatchDepth > 0;
 
     private static nuint CreateWithId(nuint windowId)
     {
@@ -616,8 +634,14 @@ public sealed unsafe class WebUiWindow : IDisposable
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     private static void CallbackTrampoline(WebUiEventNative* nativeEvent)
     {
-        if (nativeEvent is null || !Windows.TryGetValue(nativeEvent->Window, out var window))
+        if (nativeEvent is null)
         {
+            return;
+        }
+
+        if (!Windows.TryGetValue(nativeEvent->Window, out var window))
+        {
+            CompleteRefusedEvent(nativeEvent);
             return;
         }
 
@@ -743,14 +767,28 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
     }
 
+    private static void CompleteRefusedEvent(WebUiEventNative* nativeEvent)
+    {
+        // Without a reply, WebUI's thread for this call waits until the application exits, and
+        // destroying the window waits for that thread. The event is still valid here, inside the
+        // native callback.
+        if (WebUiApplication.AsynchronousResponsesEnabled)
+        {
+            byte empty = 0;
+            WebUiNative.InterfaceSetResponse(nativeEvent->Window, nativeEvent->EventNumber, &empty);
+        }
+    }
+
     private void Dispatch(WebUiEventNative* nativeEvent)
     {
         if (!TryBeginCallback())
         {
+            CompleteRefusedEvent(nativeEvent);
             return;
         }
 
         WebUiEvent? webUiEvent = null;
+        t_dispatchDepth++;
         try
         {
             webUiEvent = new WebUiEvent(this, nativeEvent);
@@ -775,6 +813,13 @@ public sealed unsafe class WebUiWindow : IDisposable
         {
             ReportCallbackFailure(exception, webUiEvent);
             CompleteCallback(webUiEvent);
+        }
+        finally
+        {
+            // The native callback returns now. Its event stays valid only while WebUI waits for
+            // an asynchronous reply, which it stops doing when the application exits.
+            webUiEvent?.EndDispatch();
+            t_dispatchDepth--;
         }
     }
 
@@ -846,7 +891,9 @@ public sealed unsafe class WebUiWindow : IDisposable
 
     private void TryDestroy()
     {
-        if (Volatile.Read(ref _disposeRequested) == 0 || Volatile.Read(ref _callbacksInFlight) != 0)
+        if (Volatile.Read(ref _disposeRequested) == 0
+            || Volatile.Read(ref _shutdownCancelled) == 0
+            || Volatile.Read(ref _callbacksInFlight) != 0)
         {
             return;
         }
@@ -856,8 +903,9 @@ public sealed unsafe class WebUiWindow : IDisposable
             return;
         }
 
-        Windows.TryRemove(_id, out _);
-        WebUiNative.Destroy(_id);
+        Windows.TryRemove(new KeyValuePair<nuint, WebUiWindow>(_id, this));
+        WebUiNativeLifetime.Destroy(_id, _generation);
+
         Volatile.Write(ref _fileHandler, null);
         _shutdown.Dispose();
     }

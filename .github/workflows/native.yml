@@ -123,7 +123,7 @@ jobs:
         run: >-
           dotnet test tests/CsWebUi.Tests/CsWebUi.Tests.csproj
           --configuration Release
-          --filter "FullyQualifiedName~WebUiNativeSmokeTests|FullyQualifiedName~WebUiWindowSmokeTests|FullyQualifiedName~WebUiFileHandlerTests"
+          --filter "FullyQualifiedName~WebUiNativeSmokeTests|FullyQualifiedName~WebUiWindowSmokeTests|FullyQualifiedName~WebUiFileHandlerTests|FullyQualifiedName~WebUiShutdownTests"
 
       - name: Configure static Windows library
         if: matrix.rid == 'win-x64'
@@ -252,6 +252,14 @@ jobs:
         env:
           CSWEBUI_NATIVE_LIBRARY: ${{ github.workspace }}/artifacts/native/linux-x64/libwebui-2.so
         run: dotnet test CsWebUi.sln --configuration Release --no-restore
+
+      - name: Stress shutdowns with pending replies in separate host processes
+        env:
+          CSWEBUI_NATIVE_LIBRARY: ${{ github.workspace }}/artifacts/native/linux-x64/libwebui-2.so
+        run: >-
+          dotnet run --project tests/CsWebUi.ShutdownStress/CsWebUi.ShutdownStress.csproj
+          --configuration Release --no-restore --
+          driver --runs 300 --parallel 8 --pending 16 --timeout-seconds 120
 
       - name: Publish and run the NativeAOT smoke test
         shell: bash

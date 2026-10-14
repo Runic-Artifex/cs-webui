@@ -90,14 +90,36 @@ public static class WebUiApplication
     }
 
     /// <summary>Requests all WebUI windows to close.</summary>
-    public static void Exit() => WebUiNative.Exit();
+    /// <remarks>
+    /// WebUI stops waiting for replies that asynchronous bindings have not sent yet, and answers
+    /// those calls with an empty result. From this call until <see cref="Clean"/>, a reply that an
+    /// asynchronous binding completes later is discarded, and <see cref="WebUiEvent"/> members that
+    /// reach the client throw <see cref="InvalidOperationException"/> outside the binding's
+    /// synchronous part. Calling the raw <c>WebUiNative.Exit</c> directly bypasses this protection.
+    /// </remarks>
+    public static void Exit() => WebUiNativeLifetime.Exit();
 
     /// <summary>Deletes all local browser profiles created by WebUI.</summary>
     public static void DeleteAllProfiles() => WebUiNative.DeleteAllProfiles();
 
     /// <summary>Releases WebUI's process-wide native resources.</summary>
-    /// <remarks>Call this only after all <see cref="WebUiWindow"/> instances are disposed.</remarks>
-    public static void Clean() => WebUiNative.Clean();
+    /// <remarks>
+    /// Call this only after all <see cref="WebUiWindow"/> instances are disposed. Like
+    /// <see cref="Exit"/>, it first stops replies from asynchronous bindings that are still
+    /// pending; a window whose disposal is still deferred by such a binding is then released
+    /// without touching the cleaned native state. WebUI can be used again afterwards, and its
+    /// process-wide configuration starts from its defaults.
+    /// </remarks>
+    public static void Clean()
+    {
+        var insideCallback = WebUiWindow.IsDispatchingOnCurrentThread;
+        WebUiNativeLifetime.Clean(insideCallback);
+        if (!insideCallback)
+        {
+            // webui_clean() resets every native option, including asynchronous responses.
+            Volatile.Write(ref _asynchronousResponsesEnabled, 0);
+        }
+    }
 
     /// <summary>Opens a URL in the user's default browser.</summary>
     public static unsafe void OpenUrl(string url)
