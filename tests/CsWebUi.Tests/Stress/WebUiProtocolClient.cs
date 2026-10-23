@@ -20,6 +20,7 @@ internal sealed partial class WebUiProtocolClient : IAsyncDisposable
 {
     private const byte Signature = 0xDD;
     private const byte CallFunction = 0xF9;
+    private const byte Navigation = 0xFB;
     private const byte CheckToken = 0xF5;
     private const byte JavaScript = 0xFE;
     private const int HeaderSize = 8;
@@ -92,6 +93,16 @@ internal sealed partial class WebUiProtocolClient : IAsyncDisposable
         var packet = new byte[HeaderSize + 1 + result.Length + 1];
         WriteHeader(packet, id, JavaScript);
         result.Span.CopyTo(packet.AsSpan(HeaderSize + 1));
+        await _socket.SendAsync(packet, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Reports a navigation as webui.js does: <c>[header][url]\0</c>.</summary>
+    internal async Task SendNavigationAsync(string url, CancellationToken cancellationToken)
+    {
+        var value = Encoding.UTF8.GetBytes(url);
+        var packet = new byte[HeaderSize + value.Length + 1];
+        WriteHeader(packet, 0, Navigation);
+        value.CopyTo(packet, HeaderSize);
         await _socket.SendAsync(packet, WebSocketMessageType.Binary, endOfMessage: true, cancellationToken).ConfigureAwait(false);
     }
 
