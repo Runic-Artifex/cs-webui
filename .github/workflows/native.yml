@@ -123,7 +123,7 @@ jobs:
         run: >-
           dotnet test tests/CsWebUi.Tests/CsWebUi.Tests.csproj
           --configuration Release
-          --filter "FullyQualifiedName~WebUiNativeSmokeTests|FullyQualifiedName~WebUiWindowSmokeTests|FullyQualifiedName~WebUiFileHandlerTests|FullyQualifiedName~WebUiShutdownTests"
+          --filter "FullyQualifiedName~WebUiNativeSmokeTests|FullyQualifiedName~WebUiWindowSmokeTests|FullyQualifiedName~WebUiFileHandlerTests|FullyQualifiedName~WebUiShutdownTests|FullyQualifiedName~WebUiLoopbackTests"
 
       - name: Configure static Windows library
         if: matrix.rid == 'win-x64'

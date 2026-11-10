@@ -16,6 +16,9 @@ public sealed unsafe class WebUiWindow : IDisposable
     // StartServer selects a free port itself and retries this often when listening fails (#18).
     private const int StartServerAttempts = 4;
 
+    // Ports tried before giving up on finding one that is free on both loopback addresses.
+    private const int PortSelectionAttempts = 16;
+
     // Keyed by generation too: WebUI reuses window ids after WebUiApplication.Clean, while a window
     // whose disposal a pending callback deferred can still be registered under its old id.
     private static readonly ConcurrentDictionary<(int Generation, nuint Id), WebUiWindow> Windows = new();
@@ -37,6 +40,7 @@ public sealed unsafe class WebUiWindow : IDisposable
     private readonly nuint _id;
     private readonly int _generation;
     private FileHandlerRegistration? _fileHandler;
+    private WebUiLoopbackGuard? _loopbackGuard;
     private int _callbacksInFlight;
     private int _customPort;
     private int _serverRequested;
@@ -182,6 +186,7 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
 
         var requested = configured?.Browser ?? WebUiBrowser.AnyBrowser;
+        ReserveServerPort();
         var started = Stopwatch.GetTimestamp();
         if (!ShowWith(content, configured, requested))
         {
@@ -205,7 +210,8 @@ public sealed unsafe class WebUiWindow : IDisposable
             return false;
         }
 
-        return ShowWith(content, configured, configured?.Browser ?? WebUiBrowser.AnyBrowser);
+        return TryReserveServerPort()
+            && ShowWith(content, configured, configured?.Browser ?? WebUiBrowser.AnyBrowser);
     }
 
     /// <summary>Shows HTML content, a local file, or a URL in a selected browser.</summary>
@@ -223,6 +229,7 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
 
         var matching = configured is not null && configured.Browser == browser ? configured : null;
+        ReserveServerPort();
         var started = Stopwatch.GetTimestamp();
         if (!ShowWith(content, matching, browser))
         {
@@ -241,7 +248,8 @@ public sealed unsafe class WebUiWindow : IDisposable
             return false;
         }
 
-        return ShowWith(content, configured is not null && configured.Browser == browser ? configured : null, browser);
+        return TryReserveServerPort()
+            && ShowWith(content, configured is not null && configured.Browser == browser ? configured : null, browser);
     }
 
     /// <summary>Shows HTML content, a local file, or a URL in an embedded WebView.</summary>
@@ -249,8 +257,9 @@ public sealed unsafe class WebUiWindow : IDisposable
     public void ShowWebView(string content)
     {
         ThrowIfDisposed();
+        ReserveServerPort();
         var started = Stopwatch.GetTimestamp();
-        if (!TryShowWebView(content))
+        if (!ShowWebViewCore(content))
         {
             throw CreateShowException(WebUiBrowser.WebView, Stopwatch.GetElapsedTime(started), null);
         }
@@ -260,6 +269,11 @@ public sealed unsafe class WebUiWindow : IDisposable
     public bool TryShowWebView(string content)
     {
         ThrowIfDisposed();
+        return TryReserveServerPort() && ShowWebViewCore(content);
+    }
+
+    private bool ShowWebViewCore(string content)
+    {
         var bytes = Utf8.Encode(content, nameof(content));
         fixed (byte* value = bytes)
         {
@@ -430,9 +444,7 @@ public sealed unsafe class WebUiWindow : IDisposable
         var bytes = Utf8.Encode(content, nameof(content));
         for (var attempt = 1; ; attempt++)
         {
-            var selectedPort = Volatile.Read(ref _customPort) == 0 && Volatile.Read(ref _serverRequested) == 0
-                ? TrySelectFreePort()
-                : 0;
+            var selectedPort = MustSelectPort() ? SelectFreePort() : 0;
             string? result;
             fixed (byte* value = bytes)
             {
@@ -454,33 +466,136 @@ public sealed unsafe class WebUiWindow : IDisposable
                 || WebUiNativeLifetime.IsExiting
                 || !IsPortTaken(selectedPort))
             {
+                if (selectedPort != 0)
+                {
+                    ReplaceLoopbackGuard(null);
+                }
+
                 return RequireServerUrl(result, _id, WebUiApplication.ReadNativeError);
             }
         }
     }
 
-    /// <summary>Gives WebUI a free port chosen by the operating system.</summary>
-    /// <returns>The port, or zero when none could be set.</returns>
-    private int TrySelectFreePort()
+    // Until WebUI's server is running, CS-WebUI picks its port unless SetPort chose one.
+    private bool MustSelectPort()
+        => Volatile.Read(ref _customPort) == 0 && Volatile.Read(ref _serverRequested) == 0;
+
+    private void ReserveServerPort()
+    {
+        if (MustSelectPort())
+        {
+            SelectFreePort();
+        }
+    }
+
+    private bool TryReserveServerPort()
+    {
+        try
+        {
+            ReserveServerPort();
+            return true;
+        }
+        catch (WebUiException exception)
+        {
+            WebUiApplication.ReportProblem(exception.Message);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Gives WebUI a port that is free on both loopback addresses, and holds its <c>[::1]</c> side.
+    /// </summary>
+    /// <returns>The port.</returns>
+    /// <exception cref="WebUiException">No such port could be found and set.</exception>
+    private int SelectFreePort()
     {
         // WebUI draws ports from rand() seeded with the current second, so processes started in
         // the same second try the same ports and all but one fail to listen (#18). The operating
         // system hands out a distinct free port instead.
-        int port;
+        //
+        // WebUI listens on 127.0.0.1 only but opens http://localhost:port, which browsers try on
+        // [::1] first. The port must be free there as well, and stays held there (see
+        // WebUiLoopbackGuard), or another local process could serve the window's page.
+        for (var attempt = 0; attempt < PortSelectionAttempts; attempt++)
+        {
+            // Alternate which family picks: Linux hands out odd ports first, so a process that
+            // holds every odd [::1] port would otherwise make every IPv4 pick collide.
+            var port = TryReserveLoopbackPort(ipv6First: attempt % 2 == 1, out var guard);
+            if (port == 0)
+            {
+                continue;
+            }
+
+            if (WebUiNative.SetPort(_id, (nuint)port) != 0)
+            {
+                ReplaceLoopbackGuard(guard);
+                return port;
+            }
+
+            guard?.Dispose();
+        }
+
+        throw new WebUiException(
+            0,
+            $"CS-WebUI could not find a port for window {_id} that is free on both 127.0.0.1 and [::1] after {PortSelectionAttempts} attempts.");
+    }
+
+    // Offers ports to try before the operating system chooses one; tests use it to offer a port
+    // another socket holds. Zero lets the operating system choose.
+    internal static Func<int>? PortCandidateSource { get; set; }
+
+    private static int TryReserveLoopbackPort(bool ipv6First, out WebUiLoopbackGuard? guard)
+    {
+        guard = null;
+        var candidate = PortCandidateSource?.Invoke() ?? 0;
         try
         {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            if (candidate == 0 && ipv6First)
+            {
+                if (!WebUiLoopbackGuard.TryCreate(0, out guard))
+                {
+                    return 0;
+                }
+
+                if (guard is not null)
+                {
+                    if (!IsPortTaken(guard.Port))
+                    {
+                        return guard.Port;
+                    }
+
+                    guard.Dispose();
+                    guard = null;
+                    return 0;
+                }
+
+                // No IPv6 loopback: let IPv4 pick.
+            }
+
+            using var listener = new TcpListener(IPAddress.Loopback, candidate);
             listener.Start();
-            port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            if (!WebUiLoopbackGuard.TryCreate(port, out guard))
+            {
+                return 0;
+            }
+
             listener.Stop();
+            return port;
         }
         catch (SocketException)
         {
+            guard?.Dispose();
+            guard = null;
             return 0;
         }
-
-        return WebUiNative.SetPort(_id, (nuint)port) != 0 ? port : 0;
     }
+
+    private void ReplaceLoopbackGuard(WebUiLoopbackGuard? guard)
+        => Interlocked.Exchange(ref _loopbackGuard, guard)?.Dispose();
+
+    /// <summary>Gets the port whose <c>[::1]</c> address this window holds, or zero.</summary>
+    internal int GuardedPort => Volatile.Read(ref _loopbackGuard)?.Port ?? 0;
 
     private static bool IsPortTaken(int port)
     {
@@ -600,26 +715,80 @@ public sealed unsafe class WebUiWindow : IDisposable
     }
 
     /// <summary>Sets the server port that will be used when the window starts.</summary>
+    /// <remarks>
+    /// The port must be free on both <c>127.0.0.1</c> and <c>[::1]</c>, because browsers open
+    /// WebUI's <c>localhost</c> URL on either. Zero lets CS-WebUI choose the port again.
+    /// </remarks>
     /// <exception cref="WebUiException">The port cannot be reserved.</exception>
     public void SetPort(nuint port)
     {
-        if (!TrySetPort(port))
+        switch (SetPortCore(port))
         {
-            throw WebUiApplication.CreateNativeException();
+            case SetPortOutcome.Set:
+                return;
+            case SetPortOutcome.IPv6LoopbackTaken:
+                throw new WebUiException(
+                    0,
+                    $"Port {port} cannot be used for window {_id}: another socket holds [::1]:{port}, where browsers would open the window's localhost URL.");
+            default:
+                throw WebUiApplication.CreateNativeException();
         }
     }
 
     /// <summary>Attempts to set the server port that will be used when the window starts.</summary>
-    public bool TrySetPort(nuint port)
+    /// <remarks>
+    /// Returns <see langword="false"/> when the port is taken on <c>127.0.0.1</c> or <c>[::1]</c>.
+    /// Zero lets CS-WebUI choose the port again.
+    /// </remarks>
+    public bool TrySetPort(nuint port) => SetPortCore(port) == SetPortOutcome.Set;
+
+    private SetPortOutcome SetPortCore(nuint port)
     {
         ThrowIfDisposed();
+        if (port == 0)
+        {
+            if (WebUiNative.SetPort(_id, 0) == 0)
+            {
+                return SetPortOutcome.Failed;
+            }
+
+            Volatile.Write(ref _customPort, 0);
+            return SetPortOutcome.Set;
+        }
+
+        if (port > IPEndPoint.MaxPort)
+        {
+            return SetPortOutcome.Failed;
+        }
+
+        // Keep holding [::1] when the window already holds this port.
+        WebUiLoopbackGuard? guard = null;
+        var keep = GuardedPort == (int)port;
+        if (!keep && !WebUiLoopbackGuard.TryCreate((int)port, out guard))
+        {
+            return SetPortOutcome.IPv6LoopbackTaken;
+        }
+
         if (WebUiNative.SetPort(_id, port) == 0)
         {
-            return false;
+            guard?.Dispose();
+            return SetPortOutcome.Failed;
+        }
+
+        if (!keep)
+        {
+            ReplaceLoopbackGuard(guard);
         }
 
         Volatile.Write(ref _customPort, 1);
-        return true;
+        return SetPortOutcome.Set;
+    }
+
+    private enum SetPortOutcome
+    {
+        Set,
+        Failed,
+        IPv6LoopbackTaken,
     }
 
     /// <summary>Sets whether the window runs in kiosk mode.</summary>
@@ -1230,6 +1399,9 @@ public sealed unsafe class WebUiWindow : IDisposable
 
         Windows.TryRemove(new KeyValuePair<(int, nuint), WebUiWindow>((_generation, _id), this));
         WebUiNativeLifetime.Destroy(_id, _generation);
+
+        // Released only once WebUI's server is gone, so [::1] is never free while it listens.
+        ReplaceLoopbackGuard(null);
 
         Volatile.Write(ref _fileHandler, null);
         _shutdown.Dispose();

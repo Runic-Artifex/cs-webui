@@ -97,7 +97,16 @@ running on other threads before WebUI frees its memory.
 
 `StartServer` asks the operating system for a free port unless `SetPort` chose
 one, and retries a few times with a new port if listening fails, so hosts
-started at the same moment do not collide on WebUI's own port choice.
+started at the same moment do not collide on WebUI's own port choice. The
+`Show` methods choose the port the same way.
+
+WebUI's server listens on `127.0.0.1` only, but opens pages at
+`http://localhost:{port}`, which browsers try on `[::1]` first. CS-WebUI
+therefore only uses a port that is also free on `[::1]`, holds `[::1]:{port}`
+itself while the window exists, and relays connections made there to WebUI's
+server. No other local process can then serve or read the window's page. The
+`CsWebUi.Native` binding does not do this: code that calls `webui_show` or
+`webui_start_server` directly gets WebUI's behaviour.
 
 The comparative stress adapter serves real HTTP traffic and then exits through
 normal managed disposal. The package smoke repeats that server-only lifecycle
