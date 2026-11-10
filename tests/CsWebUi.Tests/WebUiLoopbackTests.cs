@@ -399,6 +399,123 @@ public sealed class WebUiLoopbackTests
         after.Listen();
     }
 
+    [NativeIPv6Theory]
+    [InlineData(nameof(WebUiWindow.StartServer))]
+    [InlineData(nameof(WebUiWindow.ShowInBrowser))]
+    public async Task ConcurrentUrlAndServerStartHoldTheIPv6LoopbackOfTheServedPort(string entryPoint)
+    {
+        // Without a per-window lock both calls choose a port, and the second choice replaces the
+        // first one's [::1] guard while WebUI already serves on the first port. The first call
+        // waits here for the second to arrive; the second waits until the first one's server
+        // listens. With the lock the second call never gets here, and the first one goes on
+        // after a short timeout.
+        using var arrived = new Barrier(2);
+        WebUiWindow? window = null;
+        var offers = 0;
+        WebUiWindow.PortCandidateSource = _ =>
+        {
+            var offer = Interlocked.Increment(ref offers);
+            if (offer == 1)
+            {
+                arrived.SignalAndWait(TimeSpan.FromMilliseconds(500));
+            }
+            else if (offer == 2 && arrived.SignalAndWait(TimeSpan.FromMilliseconds(500)))
+            {
+                SpinWait.SpinUntil(
+                    () => window!.Port is var served && served != 0 && WebUiWindow.IsPortTaken((int)served),
+                    TimeSpan.FromSeconds(5));
+            }
+
+            return 0;
+        };
+        try
+        {
+            window = new WebUiWindow();
+            using var owned = window;
+            window.SetFileHandler(_ => TextResponse(RealBody));
+            using var go = new ManualResetEventSlim();
+            var url = Task.Run(() =>
+            {
+                go.Wait();
+                return window.Url;
+            });
+            var start = Task.Run(() =>
+            {
+                go.Wait();
+                if (entryPoint == nameof(WebUiWindow.StartServer))
+                {
+                    window.StartServer("index.html");
+                }
+                else
+                {
+                    window.ShowInBrowser("index.html", WebUiBrowser.NoBrowser);
+                }
+            });
+            go.Set();
+            await Task.WhenAll(url, start).WaitAsync(TimeSpan.FromSeconds(30));
+
+            var port = (int)window.Port;
+            Assert.NotEqual(0, port);
+            Assert.Equal(port, new Uri((await url)!).Port);
+            Assert.Equal(port, window.GuardedPort);
+            AssertCannotListen(IPAddress.IPv6Loopback, port);
+            Assert.Equal(RealBody, await GetAsync(IPAddress.IPv6Loopback, port));
+
+            // Only one of the calls chose the port.
+            Assert.Equal(1, offers);
+        }
+        finally
+        {
+            WebUiWindow.PortCandidateSource = null;
+        }
+    }
+
+    [NativeIPv6Fact]
+    public async Task ADestroyedWindowKeepsHoldingItsIPv6LoopbackWhenTheIPv4PortStaysTaken()
+    {
+        var port = FindPortFreeOnBothLoopbacks();
+        var reported = new List<string>();
+        var previousLimit = WebUiWindow.LoopbackReleaseLimit;
+        WebUiWindow.LoopbackReleaseLimit = TimeSpan.FromMilliseconds(200);
+        WebUiApplication.SetLogger((_, message) =>
+        {
+            lock (reported)
+            {
+                reported.Add(message);
+            }
+        });
+        var window = new WebUiWindow();
+        try
+        {
+            window.SetPort((nuint)port);
+            Assert.Equal(port, window.GuardedPort);
+
+            // Something keeps 127.0.0.1:port after the window is gone.
+            using var ipv4 = new TcpListener(IPAddress.Loopback, port);
+            ipv4.Start();
+            window.Dispose();
+
+            await window.LoopbackReleased.WaitAsync(TimeSpan.FromSeconds(10));
+            lock (reported)
+            {
+                Assert.Contains(reported, message => message.Contains($"keeps holding [::1]:{port}", StringComparison.Ordinal));
+            }
+
+            AssertCannotListen(IPAddress.IPv6Loopback, port);
+
+            // It keeps holding [::1] after 127.0.0.1 is free again: the server may still listen.
+            ipv4.Stop();
+            await Task.Delay(300);
+            AssertCannotListen(IPAddress.IPv6Loopback, port);
+        }
+        finally
+        {
+            window.Dispose();
+            WebUiApplication.SetLogger(null);
+            WebUiWindow.LoopbackReleaseLimit = previousLimit;
+        }
+    }
+
     [IPv6Fact]
     public async Task GuardResetsConnectionsBeyondItsCapUntilOneEnds()
     {
