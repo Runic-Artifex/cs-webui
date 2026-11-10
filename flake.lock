@@ -2,11 +2,11 @@
   "nodes": {
     "nixpkgs": {
       "locked": {
-        "lastModified": 1783776592,
-        "narHash": "sha256-UgCQzxeWI75XM8G+hPrPh+MKzEPjG3SpAj7dtqSbksA=",
+        "lastModified": 1794042290,
+        "narHash": "sha256-ziZn2PvCJE5JEEpqTdxXwJpPB+L3YqoCpTAMCzyaP3U=",
         "owner": "NixOS",
         "repo": "nixpkgs",
-        "rev": "e7a3ca8092b61ff85b6a45bf863ea2b2d6a661b3",
+        "rev": "f4a03c008967841f2a0b3cb7c436fc6fc31671f6",
         "type": "github"
       },
       "original": {
@@ -25,17 +25,17 @@
     "webui": {
       "flake": false,
       "locked": {
-        "lastModified": 1792686139,
-        "narHash": "sha256-2I9+1PU4nvlOr0jgjDQourDO35ZZc4k6wzSpuo/VayI=",
+        "lastModified": 1793219464,
+        "narHash": "sha256-9mLmc9Y/1e8NeqL2DFx1tIyDj43Oc7RM3D9/MVRDGlw=",
         "owner": "webui-dev",
         "repo": "webui",
-        "rev": "2b35db13f864031543f61816c496b1035c026340",
+        "rev": "24c7d196edc63f5b777d465063c3d26731f52dea",
         "type": "github"
       },
       "original": {
         "owner": "webui-dev",
         "repo": "webui",
-        "rev": "2b35db13f864031543f61816c496b1035c026340",
+        "rev": "24c7d196edc63f5b777d465063c3d26731f52dea",
         "type": "github"
       }
     }

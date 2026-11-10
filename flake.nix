@@ -6,7 +6,7 @@
     webui = {
       # Match the exact official upstream revision selected by the maintained
       # nightly-asset authority.
-      url = "github:webui-dev/webui/2b35db13f864031543f61816c496b1035c026340";
+      url = "github:webui-dev/webui/24c7d196edc63f5b777d465063c3d26731f52dea";
       flake = false;
     };
   };
@@ -90,6 +90,13 @@
             xvfb-run
           ];
           linuxLibraryPath = lib.makeLibraryPath linuxRuntimePackages;
+          # global.json is the SDK floor for every CI leg; fail evaluation if the locked nixpkgs SDK is older
+          # (10.0.403 / runtime 10.0.14 fixes CVE-2026-111497 in the NativeAOT ILCompiler pack).
+          sdkFloor = (lib.importJSON ./global.json).sdk.version;
+          dotnetSdk =
+            assert lib.assertMsg (lib.versionAtLeast pkgs.dotnet-sdk_10.version sdkFloor)
+              "nixpkgs provides .NET SDK ${pkgs.dotnet-sdk_10.version}, but global.json requires ${sdkFloor}";
+            pkgs.dotnet-sdk_10;
         in
         {
           default = pkgs.mkShell {
@@ -97,7 +104,7 @@
               clang
               cmake
               curl
-              dotnet-sdk_10
+              dotnetSdk
               git
               jq
               ninja
