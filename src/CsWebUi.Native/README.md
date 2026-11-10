@@ -73,9 +73,18 @@ WebUI's server listens on `127.0.0.1` only, but opens pages at
 `http://localhost:{port}`, which browsers try on `[::1]` first. Another local
 process listening on `[::1]:{port}` then receives the page's requests and can
 serve its own page instead. The `CsWebUi` package's `WebUiWindow` prevents
-this by choosing a port free on both addresses and holding `[::1]:{port}`;
-direct `WebUiNative.Show` and `WebUiNative.StartServer` callers do not get that
-protection.
+this by choosing a port free on both addresses and holding `[::1]:{port}`.
+This package passes WebUI's behaviour through unchanged until WebUI itself
+listens on both loopback addresses. These entry points start or move a
+window's server without that protection:
+
+- `WebUiNative.Show`, `ShowBrowser` and `ShowWebView`;
+- `WebUiNative.StartServer`;
+- `WebUiNative.GetUrl`, which starts the server when it is not running yet,
+  and returns a URL with the first network interface's address;
+- `WebUiNative.SetPort`, which checks `127.0.0.1` only, and on a running
+  server moves it to the new port later;
+- `WebUiNative.GetFreePort`, which checks `127.0.0.1` only.
 
 ## Choose this package
 

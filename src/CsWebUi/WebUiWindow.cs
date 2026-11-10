@@ -19,6 +19,13 @@ public sealed unsafe class WebUiWindow : IDisposable
     // Ports tried before giving up on finding one that is free on both loopback addresses.
     private const int PortSelectionAttempts = 16;
 
+    // How long a destroyed window keeps holding [::1] while WebUI's server still listens.
+    private static readonly TimeSpan LoopbackReleaseLimit = TimeSpan.FromSeconds(30);
+
+    // What webui_get_url shows when it has to start the server itself.
+    private static readonly byte[] ServerOnlyPage = Encoding.ASCII.GetBytes(
+        "<html><head><script src=\"webui.js\"></script></head></html>\0");
+
     // Keyed by generation too: WebUI reuses window ids after WebUiApplication.Clean, while a window
     // whose disposal a pending callback deferred can still be registered under its old id.
     private static readonly ConcurrentDictionary<(int Generation, nuint Id), WebUiWindow> Windows = new();
@@ -43,6 +50,7 @@ public sealed unsafe class WebUiWindow : IDisposable
     private WebUiLoopbackGuard? _loopbackGuard;
     private int _callbacksInFlight;
     private int _customPort;
+    private int _public;
     private int _serverRequested;
     private int _disposeRequested;
     private int _shutdownCancelled;
@@ -93,14 +101,67 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
     }
 
-    /// <summary>Gets the URL served for this window, if it is running.</summary>
+    /// <summary>Gets the URL of this window's local server.</summary>
+    /// <remarks>
+    /// <para>
+    /// WebUI starts the window's server when its URL is read before the window is shown. CS-WebUI
+    /// keeps that behaviour, but starts the server itself first, on a port it chose the same way
+    /// as <see cref="Show"/> does, so the server is protected from the start.
+    /// </para>
+    /// <para>
+    /// The URL is <c>http://localhost:{port}</c>, the origin the window's pages use. After
+    /// <see cref="SetPublic"/> with <see langword="true"/> it is WebUI's public URL, which names
+    /// the address of the first network interface instead.
+    /// </para>
+    /// </remarks>
+    /// <value>
+    /// The URL, or <see langword="null"/> when the server could not be started. The reason is
+    /// reported to the logger set with <see cref="WebUiApplication.SetLogger"/> and to
+    /// <see cref="System.Diagnostics.Trace"/>.
+    /// </value>
     public string? Url
     {
         get
         {
             ThrowIfDisposed();
-            return Utf8.Decode(WebUiNative.GetUrl(_id));
+            if (Volatile.Read(ref _serverRequested) == 0 && !TryStartServerForUrl())
+            {
+                return null;
+            }
+
+            if (Volatile.Read(ref _public) != 0)
+            {
+                return Utf8.Decode(WebUiNative.GetUrl(_id));
+            }
+
+            // webui_get_url names the first network interface's address, where WebUI does not
+            // listen unless the window is public.
+            var port = WebUiNative.GetPort(_id);
+            return port == 0
+                ? null
+                : string.Create(System.Globalization.CultureInfo.InvariantCulture, $"http://localhost:{port}");
         }
+    }
+
+    // webui_get_url would start the server through WebUI's own port choice, which checks
+    // 127.0.0.1 only. Start it here the same way webui_get_url does, after choosing the port.
+    private bool TryStartServerForUrl()
+    {
+        if (!TryReserveServerPort())
+        {
+            return false;
+        }
+
+        fixed (byte* page = ServerOnlyPage)
+        {
+            if (MarkServerStarted(WebUiNative.ShowBrowser(_id, page, (nuint)WebUiBrowser.NoBrowser) != 0))
+            {
+                return true;
+            }
+        }
+
+        WebUiApplication.ReportProblem($"WebUI could not start the server of window {_id}, so it has no URL yet.");
+        return false;
     }
 
     /// <summary>Gets the native server port for this window.</summary>
@@ -177,6 +238,11 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// WebUI could not show the window. The exception names the browser WebUI tried, where it was
     /// found, and whether it was missing, could not be started, or did not connect in time.
     /// </exception>
+    /// <exception cref="WebUiException">
+    /// CS-WebUI found no port that is free on both <c>127.0.0.1</c> and <c>[::1]</c>; see
+    /// <see cref="StartServer"/>. Also thrown when <c>CSWEBUI_BROWSER_PATH</c> names a browser that
+    /// cannot be used.
+    /// </exception>
     public void Show(string content)
     {
         ThrowIfDisposed();
@@ -220,6 +286,11 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// <see cref="WebUiApplication.SetBrowserPath"/> or <c>CSWEBUI_BROWSER_PATH</c>, that executable is used.
     /// </remarks>
     /// <exception cref="WebUiShowException">WebUI could not show the window in that browser.</exception>
+    /// <exception cref="WebUiException">
+    /// CS-WebUI found no port that is free on both <c>127.0.0.1</c> and <c>[::1]</c>; see
+    /// <see cref="StartServer"/>. Also thrown when <c>CSWEBUI_BROWSER_PATH</c> names a browser that
+    /// cannot be used.
+    /// </exception>
     public void ShowInBrowser(string content, WebUiBrowser browser)
     {
         ThrowIfDisposed();
@@ -254,6 +325,10 @@ public sealed unsafe class WebUiWindow : IDisposable
 
     /// <summary>Shows HTML content, a local file, or a URL in an embedded WebView.</summary>
     /// <exception cref="WebUiShowException">The native runtime could not show the WebView.</exception>
+    /// <exception cref="WebUiException">
+    /// CS-WebUI found no port that is free on both <c>127.0.0.1</c> and <c>[::1]</c>; see
+    /// <see cref="StartServer"/>.
+    /// </exception>
     public void ShowWebView(string content)
     {
         ThrowIfDisposed();
@@ -428,15 +503,24 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// <summary>Starts the local WebUI server without launching a browser.</summary>
     /// <returns>The absolute URL of the started server.</returns>
     /// <remarks>
+    /// <para>
     /// Unless <see cref="SetPort"/> chose a port, the first start takes a free port from the
     /// operating system and retries a few times with a new one when listening fails. WebUI's own
     /// choice repeats across processes started in the same second, so concurrent hosts collided.
     /// WebUI also resets <see cref="WebUiApplication.SetConnectionTimeout"/> to zero here.
+    /// </para>
+    /// <para>
+    /// The port must be free on both <c>127.0.0.1</c> and <c>[::1]</c>, because browsers open the
+    /// window's <c>localhost</c> URL on either. CS-WebUI tries up to 16 ports and then fails
+    /// rather than use a port it could not check; the same applies to the <c>Show</c> methods and
+    /// <see cref="Url"/>.
+    /// </para>
     /// </remarks>
     /// <exception cref="WebUiException">
     /// The native runtime could not start the server. WebUI reports this by returning an empty URL,
     /// for example when the window's server did not start listening in time. The failed call can
-    /// be retried; WebUI then selects a new port.
+    /// be retried; WebUI then selects a new port. Also thrown when no port free on both loopback
+    /// addresses was found, for example because another local process holds the ports tried.
     /// </exception>
     public string StartServer(string content)
     {
@@ -518,8 +602,8 @@ public sealed unsafe class WebUiWindow : IDisposable
         // WebUiLoopbackGuard), or another local process could serve the window's page.
         for (var attempt = 0; attempt < PortSelectionAttempts; attempt++)
         {
-            // Alternate which family picks: Linux hands out odd ports first, so a process that
-            // holds every odd [::1] port would otherwise make every IPv4 pick collide.
+            // Alternate which family picks, so ports taken on one family alone cannot use up
+            // every attempt.
             var port = TryReserveLoopbackPort(ipv6First: attempt % 2 == 1, out var guard);
             if (port == 0)
             {
@@ -535,24 +619,29 @@ public sealed unsafe class WebUiWindow : IDisposable
             guard?.Dispose();
         }
 
+        // Fail closed: WebUI's own choice checks 127.0.0.1 only.
         throw new WebUiException(
             0,
-            $"CS-WebUI could not find a port for window {_id} that is free on both 127.0.0.1 and [::1] after {PortSelectionAttempts} attempts.");
+            $"CS-WebUI could not find a port for window {_id} that is free on both 127.0.0.1 and [::1] after {PortSelectionAttempts} attempts. Another local process may be holding the ports it tried; close it or set a known free port with SetPort.");
     }
 
-    // Offers ports to try before the operating system chooses one; tests use it to offer a port
-    // another socket holds. Zero lets the operating system choose.
-    internal static Func<int>? PortCandidateSource { get; set; }
+    // Offers the port that the family picking first tries (the argument is true when IPv6 picks)
+    // instead of letting the operating system choose; tests use it to offer ports another socket
+    // holds. Zero lets the operating system choose.
+    internal static Func<bool, int>? PortCandidateSource { get; set; }
 
-    private static int TryReserveLoopbackPort(bool ipv6First, out WebUiLoopbackGuard? guard)
+    /// <summary>
+    /// Finds a port free on both loopback addresses: one family picks it, the other must accept it.
+    /// </summary>
+    /// <returns>The port with its <c>[::1]</c> side held by <paramref name="guard"/>, or zero.</returns>
+    internal static int TryReserveLoopbackPort(bool ipv6First, out WebUiLoopbackGuard? guard)
     {
         guard = null;
-        var candidate = PortCandidateSource?.Invoke() ?? 0;
         try
         {
-            if (candidate == 0 && ipv6First)
+            if (ipv6First)
             {
-                if (!WebUiLoopbackGuard.TryCreate(0, out guard))
+                if (!WebUiLoopbackGuard.TryCreate(PortCandidateSource?.Invoke(true) ?? 0, out guard))
                 {
                     return 0;
                 }
@@ -572,7 +661,7 @@ public sealed unsafe class WebUiWindow : IDisposable
                 // No IPv6 loopback: let IPv4 pick.
             }
 
-            using var listener = new TcpListener(IPAddress.Loopback, candidate);
+            using var listener = new TcpListener(IPAddress.Loopback, PortCandidateSource?.Invoke(false) ?? 0);
             listener.Start();
             var port = ((IPEndPoint)listener.LocalEndpoint).Port;
             if (!WebUiLoopbackGuard.TryCreate(port, out guard))
@@ -597,7 +686,10 @@ public sealed unsafe class WebUiWindow : IDisposable
     /// <summary>Gets the port whose <c>[::1]</c> address this window holds, or zero.</summary>
     internal int GuardedPort => Volatile.Read(ref _loopbackGuard)?.Port ?? 0;
 
-    private static bool IsPortTaken(int port)
+    /// <summary>Completes when a destroyed window has stopped holding <c>[::1]</c>.</summary>
+    internal Task LoopbackReleased { get; private set; } = Task.CompletedTask;
+
+    internal static bool IsPortTaken(int port)
     {
         try
         {
@@ -716,20 +808,41 @@ public sealed unsafe class WebUiWindow : IDisposable
 
     /// <summary>Sets the server port that will be used when the window starts.</summary>
     /// <remarks>
+    /// <para>
     /// The port must be free on both <c>127.0.0.1</c> and <c>[::1]</c>, because browsers open
-    /// WebUI's <c>localhost</c> URL on either. Zero lets CS-WebUI choose the port again.
+    /// WebUI's <c>localhost</c> URL on either. The window holds <c>[::1]:{port}</c> from this call
+    /// until it is disposed.
+    /// </para>
+    /// <para>
+    /// Zero, before the server starts, discards an earlier choice: CS-WebUI then chooses the port
+    /// when the window starts.
+    /// </para>
+    /// <para>
+    /// Once the server runs, after <see cref="StartServer"/>, a successful <c>Show</c> method or
+    /// reading <see cref="Url"/>, its port cannot change. WebUI would move the server
+    /// asynchronously, and the old port could not stay protected while it does. Create a new
+    /// window to use another port.
+    /// </para>
     /// </remarks>
     /// <exception cref="WebUiException">The port cannot be reserved.</exception>
+    /// <exception cref="InvalidOperationException">The window's server is already running.</exception>
     public void SetPort(nuint port)
     {
-        switch (SetPortCore(port))
+        switch (SetPortCore(port, out var error))
         {
             case SetPortOutcome.Set:
                 return;
+            case SetPortOutcome.ServerRunning:
+                throw new InvalidOperationException(
+                    $"The server of window {_id} is already running on port {WebUiNative.GetPort(_id)}; its port cannot change. Call SetPort before StartServer, Show or Url, or use a new window.");
             case SetPortOutcome.IPv6LoopbackTaken:
                 throw new WebUiException(
                     0,
                     $"Port {port} cannot be used for window {_id}: another socket holds [::1]:{port}, where browsers would open the window's localhost URL.");
+            case SetPortOutcome.SocketFailed:
+                throw new WebUiException(
+                    0,
+                    $"Port {port} cannot be used for window {_id}: CS-WebUI could not hold [::1]:{port} ({error!.SocketErrorCode}: {error.Message}).");
             default:
                 throw WebUiApplication.CreateNativeException();
         }
@@ -737,14 +850,24 @@ public sealed unsafe class WebUiWindow : IDisposable
 
     /// <summary>Attempts to set the server port that will be used when the window starts.</summary>
     /// <remarks>
-    /// Returns <see langword="false"/> when the port is taken on <c>127.0.0.1</c> or <c>[::1]</c>.
-    /// Zero lets CS-WebUI choose the port again.
+    /// Behaves like <see cref="SetPort"/>, but returns <see langword="false"/> instead of throwing
+    /// when the port is taken on <c>127.0.0.1</c> or <c>[::1]</c>, cannot be held, or the server is
+    /// already running.
     /// </remarks>
-    public bool TrySetPort(nuint port) => SetPortCore(port) == SetPortOutcome.Set;
+    /// <exception cref="ObjectDisposedException">The window has been disposed.</exception>
+    public bool TrySetPort(nuint port) => SetPortCore(port, out _) == SetPortOutcome.Set;
 
-    private SetPortOutcome SetPortCore(nuint port)
+    private SetPortOutcome SetPortCore(nuint port, out SocketException? error)
     {
         ThrowIfDisposed();
+        error = null;
+        if (Volatile.Read(ref _serverRequested) != 0)
+        {
+            // webui_set_port on a running server only requests a reload that the server thread
+            // performs later, while pages still use the old port.
+            return SetPortOutcome.ServerRunning;
+        }
+
         if (port == 0)
         {
             if (WebUiNative.SetPort(_id, 0) == 0)
@@ -753,6 +876,7 @@ public sealed unsafe class WebUiWindow : IDisposable
             }
 
             Volatile.Write(ref _customPort, 0);
+            ReplaceLoopbackGuard(null);
             return SetPortOutcome.Set;
         }
 
@@ -764,9 +888,17 @@ public sealed unsafe class WebUiWindow : IDisposable
         // Keep holding [::1] when the window already holds this port.
         WebUiLoopbackGuard? guard = null;
         var keep = GuardedPort == (int)port;
-        if (!keep && !WebUiLoopbackGuard.TryCreate((int)port, out guard))
+        try
         {
-            return SetPortOutcome.IPv6LoopbackTaken;
+            if (!keep && !WebUiLoopbackGuard.TryCreate((int)port, out guard))
+            {
+                return SetPortOutcome.IPv6LoopbackTaken;
+            }
+        }
+        catch (SocketException exception)
+        {
+            error = exception;
+            return SetPortOutcome.SocketFailed;
         }
 
         if (WebUiNative.SetPort(_id, port) == 0)
@@ -789,6 +921,8 @@ public sealed unsafe class WebUiWindow : IDisposable
         Set,
         Failed,
         IPv6LoopbackTaken,
+        SocketFailed,
+        ServerRunning,
     }
 
     /// <summary>Sets whether the window runs in kiosk mode.</summary>
@@ -845,6 +979,7 @@ public sealed unsafe class WebUiWindow : IDisposable
     {
         ThrowIfDisposed();
         WebUiNative.SetPublic(_id, WebUiApplication.NativeBoolean(enabled));
+        Volatile.Write(ref _public, enabled ? 1 : 0);
     }
 
     /// <summary>Sets the window's outer dimensions in pixels.</summary>
@@ -1400,8 +1535,13 @@ public sealed unsafe class WebUiWindow : IDisposable
         Windows.TryRemove(new KeyValuePair<(int, nuint), WebUiWindow>((_generation, _id), this));
         WebUiNativeLifetime.Destroy(_id, _generation);
 
-        // Released only once WebUI's server is gone, so [::1] is never free while it listens.
-        ReplaceLoopbackGuard(null);
+        // webui_destroy returns before the server has stopped when it runs inside one of the
+        // window's callbacks, and after its timeouts. [::1] stays held until 127.0.0.1 is free.
+        var guard = Interlocked.Exchange(ref _loopbackGuard, null);
+        if (guard is not null)
+        {
+            LoopbackReleased = guard.DisposeWhenServerStopped(LoopbackReleaseLimit);
+        }
 
         Volatile.Write(ref _fileHandler, null);
         _shutdown.Dispose();

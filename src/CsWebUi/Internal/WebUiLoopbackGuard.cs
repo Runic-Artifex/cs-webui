@@ -1,3 +1,6 @@
+using System.Buffers;
+using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 
@@ -15,27 +18,48 @@ namespace CsWebUi.Internal;
 /// process could listen on <c>[::1]:port</c> and serve or proxy the whole page.
 /// </para>
 /// <para>
-/// The guard is a listening socket without <c>SO_REUSEADDR</c> or <c>SO_REUSEPORT</c> (exclusive
-/// on Windows), so no other socket can listen on the address while it exists. It forwards each
-/// connection byte for byte, so the page, its WebSocket and WebUI's own checks behave exactly as
-/// for a direct IPv4 connection. Half-closes are passed on; a failure on either side resets both.
+/// The guard is a listening socket that never sets <c>SO_REUSEPORT</c>, so no other socket can
+/// listen on the address while it exists. .NET sets <c>SO_REUSEADDR</c> on every TCP socket it
+/// binds on Linux and macOS; that does not matter here. On Linux a listening socket keeps every
+/// other bind off its address unless both sockets set <c>SO_REUSEPORT</c>, and on macOS and the
+/// BSDs a second bind to the same address needs <c>SO_REUSEPORT</c> on both sockets as well. On
+/// Windows the guard sets <c>SO_EXCLUSIVEADDRUSE</c> before it binds, which no
+/// <c>SO_REUSEADDR</c> socket can override.
+/// </para>
+/// <para>
+/// It forwards each connection byte for byte, so the page, its WebSocket and WebUI's own checks
+/// behave exactly as for a direct IPv4 connection. Half-closes are passed on; a failure on either
+/// side resets both. At most <see cref="DefaultMaxConnections"/> connections are relayed at once;
+/// the guard resets further ones until one ends, and reports that once per burst.
 /// </para>
 /// </remarks>
 internal sealed class WebUiLoopbackGuard : IDisposable
 {
+    // A page uses a handful of connections: the document, its scripts and the WebUI WebSocket.
+    // Each relayed connection costs two sockets and two buffers, so the cap keeps a local process
+    // from using up the application's file descriptors through the guard.
+    internal const int DefaultMaxConnections = 256;
+
     private const int BufferSize = 16 * 1024;
+    private static readonly TimeSpan MinAcceptBackoff = TimeSpan.FromMilliseconds(10);
+    private static readonly TimeSpan MaxAcceptBackoff = TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan MaxReleasePollInterval = TimeSpan.FromMilliseconds(250);
 
     private readonly Socket _listener;
     private readonly IPEndPoint _target;
+    private readonly int _maxConnections;
     private readonly CancellationTokenSource _closed = new();
     private readonly HashSet<Socket> _connections = [];
     private readonly object _gate = new();
+    private int _relays;
+    private bool _capReported;
     private bool _disposed;
 
-    private WebUiLoopbackGuard(Socket listener, int port)
+    private WebUiLoopbackGuard(Socket listener, int port, int maxConnections)
     {
         _listener = listener;
         _target = new IPEndPoint(IPAddress.Loopback, port);
+        _maxConnections = maxConnections;
         Port = port;
         _ = AcceptLoopAsync();
     }
@@ -51,8 +75,16 @@ internal sealed class WebUiLoopbackGuard : IDisposable
     /// or this machine has no IPv6 loopback at all. <see langword="false"/> when another socket
     /// already holds the address, so the port must not be used.
     /// </returns>
+    /// <exception cref="SocketException">
+    /// No socket could be created for another reason, for example because the process has no file
+    /// descriptors left.
+    /// </exception>
     internal static bool TryCreate(int port, out WebUiLoopbackGuard? guard)
+        => TryCreate(port, DefaultMaxConnections, out guard);
+
+    internal static bool TryCreate(int port, int maxConnections, out WebUiLoopbackGuard? guard)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxConnections, 1);
         guard = null;
         if (!Socket.OSSupportsIPv6)
         {
@@ -88,8 +120,48 @@ internal sealed class WebUiLoopbackGuard : IDisposable
         }
 
         // Port zero lets the operating system choose; the guard reports the port it holds.
-        guard = new WebUiLoopbackGuard(listener, ((IPEndPoint)listener.LocalEndPoint!).Port);
+        guard = new WebUiLoopbackGuard(listener, ((IPEndPoint)listener.LocalEndPoint!).Port, maxConnections);
         return true;
+    }
+
+    /// <summary>
+    /// Disposes the guard once nothing listens on <c>127.0.0.1</c> at its port any more.
+    /// </summary>
+    /// <remarks>
+    /// Waits on the thread pool, never on the caller, which may be WebUI's callback thread that
+    /// the server's shutdown waits for. When the port stays taken beyond <paramref name="limit"/>,
+    /// the guard is kept for the rest of the process, so <c>[::1]</c> is never free while WebUI's
+    /// server may still listen.
+    /// </remarks>
+    /// <returns>A task that completes when the guard is disposed or kept for good.</returns>
+    internal Task DisposeWhenServerStopped(TimeSpan limit)
+    {
+        if (!WebUiWindow.IsPortTaken(Port))
+        {
+            Dispose();
+            return Task.CompletedTask;
+        }
+
+        return Task.Run(async () =>
+        {
+            var started = Stopwatch.GetTimestamp();
+            var delay = TimeSpan.FromMilliseconds(10);
+            while (WebUiWindow.IsPortTaken(Port))
+            {
+                if (Stopwatch.GetElapsedTime(started) >= limit)
+                {
+                    WebUiApplication.ReportProblem(string.Create(
+                        CultureInfo.InvariantCulture,
+                        $"127.0.0.1:{Port} is still in use {limit.TotalSeconds:0} s after its window was destroyed; CS-WebUI keeps holding [::1]:{Port}."));
+                    return;
+                }
+
+                await Task.Delay(delay).ConfigureAwait(false);
+                delay = TimeSpan.FromTicks(Math.Min(delay.Ticks * 2, MaxReleasePollInterval.Ticks));
+            }
+
+            Dispose();
+        });
     }
 
     /// <summary>Stops listening and resets every relayed connection.</summary>
@@ -128,6 +200,7 @@ internal sealed class WebUiLoopbackGuard : IDisposable
     private async Task AcceptLoopAsync()
     {
         var token = _closed.Token;
+        var backoff = TimeSpan.Zero;
         while (true)
         {
             Socket client;
@@ -139,18 +212,81 @@ internal sealed class WebUiLoopbackGuard : IDisposable
             {
                 return;
             }
-            catch (SocketException)
+            catch (SocketException exception)
             {
                 if (token.IsCancellationRequested)
                 {
                     return;
                 }
 
-                // A connection that failed before it was accepted; keep serving the others.
+                if (exception.SocketErrorCode is SocketError.ConnectionReset or SocketError.ConnectionAborted)
+                {
+                    // A connection that failed before it was accepted; keep serving the others.
+                    continue;
+                }
+
+                // Anything else, such as running out of file descriptors, fails again at once.
+                // Wait instead of spinning, and keep the address held.
+                backoff = backoff == TimeSpan.Zero
+                    ? MinAcceptBackoff
+                    : TimeSpan.FromTicks(Math.Min(backoff.Ticks * 2, MaxAcceptBackoff.Ticks));
+                try
+                {
+                    await Task.Delay(backoff, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                continue;
+            }
+
+            backoff = TimeSpan.Zero;
+            if (!TryBeginRelay())
+            {
+                Abort(client);
                 continue;
             }
 
             _ = RelayAsync(client, token);
+        }
+    }
+
+    private bool TryBeginRelay()
+    {
+        bool report;
+        lock (_gate)
+        {
+            if (_relays < _maxConnections)
+            {
+                _relays++;
+                return true;
+            }
+
+            report = !_capReported;
+            _capReported = true;
+        }
+
+        if (report)
+        {
+            WebUiApplication.ReportProblem(
+                $"CS-WebUI relays at most {_maxConnections} connections at once to the server of port {Port}; it resets further connections until one ends.");
+        }
+
+        return false;
+    }
+
+    private void EndRelay()
+    {
+        lock (_gate)
+        {
+            _relays--;
+            if (_relays < _maxConnections / 2)
+            {
+                // Report again if the cap is reached after the load has eased.
+                _capReported = false;
+            }
         }
     }
 
@@ -200,6 +336,8 @@ internal sealed class WebUiLoopbackGuard : IDisposable
             {
                 Release(server);
             }
+
+            EndRelay();
         }
     }
 
@@ -207,12 +345,12 @@ internal sealed class WebUiLoopbackGuard : IDisposable
     // false when the stream failed, so both connections must be reset.
     private static async Task<bool> PumpAsync(Socket source, Socket destination, CancellationToken token)
     {
-        var buffer = new byte[BufferSize];
+        var buffer = ArrayPool<byte>.Shared.Rent(BufferSize);
         try
         {
             while (true)
             {
-                var read = await source.ReceiveAsync(buffer, SocketFlags.None, token).ConfigureAwait(false);
+                var read = await source.ReceiveAsync(buffer.AsMemory(0, BufferSize), SocketFlags.None, token).ConfigureAwait(false);
                 if (read == 0)
                 {
                     destination.Shutdown(SocketShutdown.Send);
@@ -232,6 +370,10 @@ internal sealed class WebUiLoopbackGuard : IDisposable
             Abort(source);
             Abort(destination);
             return false;
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
         }
     }
 
