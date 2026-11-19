@@ -10,7 +10,11 @@ public sealed class WebUiWebViewWindowTests
     {
         var asked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var calls = 0;
-        using var session = new WebViewSession(window =>
+        var texts = new WebUiTexts(WebUiTextsTests.German, "de");
+        var page = "<!doctype html><html><head><script src=\"/webui.js\"></script><script>" + texts.BannerScript
+            + "</script></head><body>CS-WebUI</body></html>";
+        using var session = new WebViewSession(
+            window =>
         {
             window.SetSize(800, 600);
             window.SetCloseHandler(() =>
@@ -19,11 +23,13 @@ public sealed class WebUiWebViewWindowTests
                 asked.TrySetResult();
                 return false;
             });
-        });
+        },
+            page);
         await session.ShownAsync();
         var window = session.Window;
 
         await PlacementIsReadAndRestoredAsync(window);
+        BannerIsShownInTheTexts(window);
 
         // The user's close is refused and the window stays.
         NativeWindowClose.RequestUserClose(window);
@@ -43,6 +49,25 @@ public sealed class WebUiWebViewWindowTests
         Assert.False(window.IsShown);
         Assert.Equal(0, window.NativeHandle);
         Assert.Equal(1, Volatile.Read(ref calls));
+    }
+
+    // Adds the banner as WebUI's bridge does when it cannot connect, and reads what the page shows.
+    private static void BannerIsShownInTheTexts(WebUiWindow window)
+    {
+        window.RunJavaScript(
+            "const d=document.createElement('div');d.id='webui-error-connection-lost';"
+            + "d.innerHTML='<strong>Error:</strong> Failed to connect to the backend application - <em>WebUI 2.5.0-beta.4</em>';"
+            + "document.body.insertBefore(d,document.body.firstChild);");
+        var shown = string.Empty;
+        for (var attempt = 0; attempt < 50 && !shown.StartsWith("Fehler:", StringComparison.Ordinal); attempt++)
+        {
+            Thread.Sleep(100);
+            shown = window.ExecuteJavaScript(
+                "const d=document.getElementById('webui-error-connection-lost');return d?d.textContent+'|'+d.lang:'';",
+                TimeSpan.FromSeconds(5));
+        }
+
+        Assert.Equal("Fehler: Verbindung zur Anwendung fehlgeschlagen - WebUI 2.5.0-beta.4|de", shown);
     }
 
     private static async Task PlacementIsReadAndRestoredAsync(WebUiWindow window)

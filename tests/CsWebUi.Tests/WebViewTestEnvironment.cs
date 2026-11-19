@@ -44,7 +44,7 @@ internal sealed class WebViewSession : IDisposable
     private readonly TaskCompletionSource _shown = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _waitEnded = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    internal WebViewSession(Action<WebUiWindow>? configure = null)
+    internal WebViewSession(Action<WebUiWindow>? configure = null, string page = Page)
     {
         Assert.True(Interlocked.Exchange(ref s_opened, 1) == 0, "A test process opens one WebView session only.");
         Window = new WebUiWindow();
@@ -53,7 +53,7 @@ internal sealed class WebViewSession : IDisposable
         {
             try
             {
-                Window.ShowWebView(Page);
+                Window.ShowWebView(page);
                 _shown.TrySetResult();
                 WebUiApplication.Wait();
             }
