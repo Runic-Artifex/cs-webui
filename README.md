@@ -215,14 +215,58 @@ asynchronous-response mode is enabled. The delegate remains retained until it
 is replaced or the window is disposed. An in-flight request safely finishes
 with the registration it started with, and disposal defers native destruction
 while managed callbacks are active. Exceptions are contained and become a
-minimal 500 response. `WebUiFileHandlerOptions.MaxResponseBytes` can impose a
+minimal 500 response, an HTML page in the window's texts when
+`SetTexts` gave it some. `WebUiFileHandlerOptions.MaxResponseBytes` can impose a
 lower response limit than the native signed 32-bit length maximum.
 
 `NotHandled` deliberately falls through to WebUI's configured local root. A
-closed virtual boundary should return its own complete 404 response instead.
+closed virtual boundary should return its own complete 404 response instead,
+or `WebUiFileHandlerResult.NotFound` for a 404 page in the window's texts.
 The callback cannot inspect request headers, WebUI serializes HTTP handling
 behind a process-wide mutex, and async-response mode is also process-wide. This
 is a contiguous-buffer API, not streaming.
+
+### Translatable texts
+
+The pages and messages CS-WebUI and WebUI show themselves have stable keys
+in `WebUiTexts.Keys`, with English defaults (`WebUiTexts.English`). Give a
+window other texts with a key → text table; keys it leaves out stay English,
+and an unknown key throws:
+
+```csharp
+window.SetTexts(new WebUiTexts(new Dictionary<string, string>
+{
+    [WebUiTexts.NotFoundTitle] = "Ressource nicht verfügbar",
+    [WebUiTexts.NotFoundMessage] = "Die angeforderte Ressource ist nicht verfügbar.",
+}, language: "de"));
+
+window.SetFileHandler(path => assets.TryGet(path, out var response)
+    ? WebUiFileHandlerResult.FromResponse(response)
+    : WebUiFileHandlerResult.NotFound); // a 404 page in the window's texts
+```
+
+| Key | English | Shown |
+| --- | --- | --- |
+| `not_found.title`, `not_found.message` | Resource Not Available / The requested resource is not available. | 404 page of `WebUiFileHandlerResult.NotFound` |
+| `server_error.title`, `server_error.message` | Internal Server Error / The application could not answer this request. | 500 page when the file handler throws or exceeds its limit (without texts: plain-text `Internal Server Error`) |
+| `bridge.error_prefix` | Error: | Label of WebUI's bridge banners |
+| `bridge.connection_failed` | Failed to connect to the backend application | Banner when the page cannot connect within 5 s |
+| `bridge.websocket_unsupported` | WebSocket is not supported by your web browser | Banner when the browser has no WebSocket |
+| `bridge.connection_lost` | Connection with the backend is lost | Banner when the connection ends and no event binding handles it |
+
+WebUI serves its bridge (`webui.js`) before any file handler runs, with the
+English banners built in. A page that should show them in other texts runs
+`WebUiTexts.BannerScript`, inline or served by the file handler. The script
+watches for the banner WebUI adds and rewrites it as text. It is fragile by
+nature: it recognizes the banner by its element id
+(`webui-error-connection-lost`) and each message by its English text at the
+pinned WebUI revision. If WebUI changes either, the banner stays English;
+a test fails when the pinned bridge no longer matches.
+
+WebUI's own pages stay English, because WebUI sends them itself and has no
+way to change them: the 403 "Access Denied" page it sends to a second client
+before any handler runs, and its 404 "Resource Not Available" page for a path
+that `NotHandled` passes on and WebUI cannot serve.
 
 ## Guarding the window's close
 

@@ -55,6 +55,7 @@ public sealed unsafe class WebUiWindow : IDisposable
     private readonly int _generation;
     private FileHandlerRegistration? _fileHandler;
     private Func<bool>? _closeHandler;
+    private WebUiTexts? _texts;
     private WebUiLoopbackGuard? _loopbackGuard;
     private int _callbacksInFlight;
     private int _customPort;
@@ -1096,6 +1097,31 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
     }
 
+    /// <summary>Sets the texts of the pages CS-WebUI answers for this window, or restores English.</summary>
+    /// <param name="texts">The texts, or <see langword="null"/> for <see cref="WebUiTexts.English"/>.</param>
+    /// <remarks>
+    /// <para>
+    /// The texts apply to the 404 page of <see cref="WebUiFileHandlerResult.NotFound"/> and to the
+    /// 500 page CS-WebUI returns when the file handler throws or exceeds its response limit. Without
+    /// texts, that 500 response stays the plain-text <c>Internal Server Error</c>.
+    /// </para>
+    /// <para>
+    /// WebUI's own pages stay English, because WebUI sends them itself: the 403 "Access Denied" page
+    /// it sends to a second client before any handler runs, and its 404 page for a path that
+    /// <see cref="WebUiFileHandlerResult.NotHandled"/> passes on and WebUI cannot serve. The bridge
+    /// banners change only in pages that run <see cref="WebUiTexts.BannerScript"/>.
+    /// </para>
+    /// </remarks>
+    public void SetTexts(WebUiTexts? texts)
+    {
+        ThrowIfDisposed();
+        Volatile.Write(ref _texts, texts);
+    }
+
+    private WebUiTexts Texts => Volatile.Read(ref _texts) ?? WebUiTexts.English;
+
+    private byte[] ServerErrorResponse => Volatile.Read(ref _texts)?.ServerErrorResponse ?? FileHandlerFailureResponse;
+
     /// <summary>Sets the server port that will be used when the window starts.</summary>
     /// <remarks>
     /// <para>
@@ -1640,6 +1666,11 @@ public sealed unsafe class WebUiWindow : IDisposable
                     ? WebUiFileHandlerResult.NotHandled
                     : registration.Handler(Utf8.DecodeRequired(path));
 
+                if (result.IsNotFound)
+                {
+                    result = WebUiFileHandlerResult.FromResponse(window.Texts.NotFoundResponse);
+                }
+
                 if (result.IsHandled && result.Response.Length > registration!.MaxResponseBytes)
                 {
                     throw new InvalidDataException(
@@ -1649,7 +1680,7 @@ public sealed unsafe class WebUiWindow : IDisposable
             catch (Exception exception)
             {
                 WebUiApplication.ReportUnhandledCallbackException(exception, window, null);
-                result = WebUiFileHandlerResult.FromResponse(FileHandlerFailureResponse);
+                result = WebUiFileHandlerResult.FromResponse(window.ServerErrorResponse);
             }
 
             if (!result.IsHandled)
@@ -1670,7 +1701,7 @@ public sealed unsafe class WebUiWindow : IDisposable
 
             try
             {
-                return CopyFileResponseToNative(windowId, FileHandlerFailureResponse, length);
+                return CopyFileResponseToNative(windowId, window?.ServerErrorResponse ?? FileHandlerFailureResponse, length);
             }
             catch
             {

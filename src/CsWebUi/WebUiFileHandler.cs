@@ -10,21 +10,43 @@ public readonly struct WebUiFileHandlerResult
 {
     private readonly ReadOnlyMemory<byte> _response;
 
-    private WebUiFileHandlerResult(ReadOnlyMemory<byte> response)
+    private WebUiFileHandlerResult(ReadOnlyMemory<byte> response, bool isNotFound = false)
     {
         _response = response;
         IsHandled = true;
+        IsNotFound = isNotFound;
     }
 
     /// <summary>
     /// Gets a result that allows WebUI to continue with its configured local-file handling.
     /// </summary>
+    /// <remarks>
+    /// A path WebUI cannot serve then gets WebUI's own English 404 page. Return
+    /// <see cref="NotFound"/> instead to answer it with the window's texts.
+    /// </remarks>
     public static WebUiFileHandlerResult NotHandled => default;
 
-    /// <summary>Gets whether this result contains a complete raw HTTP response.</summary>
+    /// <summary>
+    /// Gets a result that answers the request with a 404 page in the window's texts, set with
+    /// <see cref="WebUiWindow.SetTexts"/>.
+    /// </summary>
+    /// <remarks>
+    /// The page uses <see cref="WebUiTexts.NotFoundTitle"/> and
+    /// <see cref="WebUiTexts.NotFoundMessage"/>. <see cref="Response"/> is empty: CS-WebUI writes
+    /// the page when the handler returns.
+    /// </remarks>
+    public static WebUiFileHandlerResult NotFound { get; } = new(ReadOnlyMemory<byte>.Empty, isNotFound: true);
+
+    /// <summary>Gets whether this result answers the request.</summary>
     public bool IsHandled { get; }
 
-    /// <summary>Gets the complete raw HTTP response when <see cref="IsHandled"/> is true.</summary>
+    /// <summary>Gets whether this is <see cref="NotFound"/>.</summary>
+    public bool IsNotFound { get; }
+
+    /// <summary>
+    /// Gets the complete raw HTTP response when <see cref="IsHandled"/> is true; empty for
+    /// <see cref="NotFound"/>.
+    /// </summary>
     public ReadOnlyMemory<byte> Response => _response;
 
     /// <summary>Creates a handled result from complete raw HTTP header and body bytes.</summary>
