@@ -54,6 +54,7 @@ public sealed unsafe class WebUiWindow : IDisposable
     private readonly nuint _id;
     private readonly int _generation;
     private FileHandlerRegistration? _fileHandler;
+    private Func<bool>? _closeHandler;
     private WebUiLoopbackGuard? _loopbackGuard;
     private int _callbacksInFlight;
     private int _customPort;
@@ -63,6 +64,10 @@ public sealed unsafe class WebUiWindow : IDisposable
     private int _disposeRequested;
     private int _shutdownCancelled;
     private int _destroyed;
+
+    // Set by Close until the window is shown again: GTK asks the close handler again when WebUI
+    // closes the window, and that close must not be refused.
+    private int _closeApproved;
 
     /// <summary>Creates a new WebUI window with an automatically allocated identifier.</summary>
     /// <exception cref="WebUiException">The native runtime could not allocate the window.</exception>
@@ -606,9 +611,11 @@ public sealed unsafe class WebUiWindow : IDisposable
     private bool MustSelectPort()
         => Volatile.Read(ref _customPort) == 0 && Volatile.Read(ref _serverRequested) == 0 && _startsInFlight == 0;
 
-    // Chooses the port, unless it is already chosen, and counts the start as in flight.
+    // Chooses the port, unless it is already chosen, and counts the start as in flight. Every Show
+    // and StartServer begins here, so a close approved before it no longer applies.
     private int BeginServerStart()
     {
+        Volatile.Write(ref _closeApproved, 0);
         lock (_portGate)
         {
             var selectedPort = MustSelectPort() ? SelectFreePort() : 0;
@@ -801,10 +808,71 @@ public sealed unsafe class WebUiWindow : IDisposable
     }
 
     /// <summary>Closes the visible window but retains its native object and bindings.</summary>
+    /// <remarks>
+    /// A handler set with <see cref="SetCloseHandler"/> cannot refuse this close: until the window
+    /// is shown again, CS-WebUI allows every close without calling the handler.
+    /// </remarks>
     public void Close()
     {
         ThrowIfDisposed();
+        Volatile.Write(ref _closeApproved, 1);
         WebUiNative.Close(_id);
+    }
+
+    /// <summary>
+    /// Gets whether WebUI on this operating system asks a handler set with
+    /// <see cref="SetCloseHandler"/> before an embedded WebView window closes.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> on Windows (WebView2) and Linux (WebKitGTK); <see langword="false"/>
+    /// on macOS, where WebUI learns of the close only after the window has closed.
+    /// </value>
+    public static bool IsCloseHandlerSupported => OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+
+    /// <summary>
+    /// Sets a handler that decides whether the user may close this window's embedded WebView, or
+    /// removes it.
+    /// </summary>
+    /// <param name="handler">
+    /// Returns <see langword="true"/> to let the window close, or <see langword="false"/> to keep it
+    /// open. <see langword="null"/> removes the handler, and the window closes without asking.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// WebUI calls the handler when the user closes the window, for example with its close button
+    /// or the system's close shortcut, in these cases only:
+    /// </para>
+    /// <list type="table">
+    /// <listheader><term>Window</term><description>Handler</description></listheader>
+    /// <item><term>Windows, WebView2</term><description>Called on <c>WM_CLOSE</c>; <see langword="false"/> keeps the window open.</description></item>
+    /// <item><term>Linux, WebKitGTK</term><description>Called on GTK's <c>delete-event</c>; <see langword="false"/> keeps the window open.</description></item>
+    /// <item><term>macOS, WebKit</term><description>Never called. WebUI learns of the close only after the window has closed.</description></item>
+    /// <item><term>Browser window, any system</term><description>Never called. The browser closes its window without asking WebUI.</description></item>
+    /// </list>
+    /// <para>
+    /// <see cref="IsCloseHandlerSupported"/> tells whether the operating system is one that asks.
+    /// The handler runs on the window's user-interface thread: on Windows the WebView's own thread,
+    /// on Linux the thread that runs <see cref="WebUiApplication.Wait"/>. The window does not respond
+    /// while it runs, so return quickly. To ask the user asynchronously, return
+    /// <see langword="false"/>, ask, and call <see cref="Close"/> once the close is approved.
+    /// </para>
+    /// <para>
+    /// Closes the application starts are never refused, and the handler is not called for them:
+    /// <see cref="Close"/>, <see cref="Dispose"/>, <see cref="WebUiApplication.Exit"/> and
+    /// <see cref="WebUiApplication.Clean"/>. GTK reports WebUI's own close as a
+    /// <c>delete-event</c> too, so CS-WebUI answers it for the handler. If the handler throws, the
+    /// exception is reported to <see cref="WebUiApplication.UnhandledCallbackException"/> and the
+    /// window closes.
+    /// </para>
+    /// </remarks>
+    public void SetCloseHandler(Func<bool>? handler)
+    {
+        lock (_lifecycleGate)
+        {
+            ThrowIfDisposed();
+            Volatile.Write(ref _closeHandler, handler);
+            WebUiNative.SetCloseHandlerWebView(_id, handler is null ? null : &CloseHandlerTrampoline);
+        }
     }
 
     /// <summary>Brings the window to the foreground.</summary>
@@ -1348,6 +1416,51 @@ public sealed unsafe class WebUiWindow : IDisposable
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static byte CloseHandlerTrampoline(nuint windowId)
+    {
+        try
+        {
+            return Windows.TryGetValue((WebUiNativeLifetime.Generation, windowId), out var window)
+                && !window.AllowsClose()
+                ? (byte)0
+                : (byte)1;
+        }
+        catch
+        {
+            // No managed exception may cross the native callback boundary.
+            return 1;
+        }
+    }
+
+    // Whether the window may close now; false keeps it open.
+    internal bool AllowsClose()
+    {
+        if (Volatile.Read(ref _closeApproved) != 0 || WebUiNativeLifetime.IsExiting || !TryBeginCallback())
+        {
+            return true;
+        }
+
+        t_dispatchDepth++;
+        WebUiNativeLifetime.EnterDispatch();
+        try
+        {
+            var handler = Volatile.Read(ref _closeHandler);
+            return handler is null || handler();
+        }
+        catch (Exception exception)
+        {
+            WebUiApplication.ReportUnhandledCallbackException(exception, this, null);
+            return true;
+        }
+        finally
+        {
+            WebUiNativeLifetime.LeaveDispatch();
+            t_dispatchDepth--;
+            EndCallback();
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     private static void* FileHandlerTrampoline(nuint windowId, byte* path, int* length)
     {
         if (length is null)
@@ -1626,6 +1739,7 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
 
         Volatile.Write(ref _fileHandler, null);
+        Volatile.Write(ref _closeHandler, null);
         _shutdown.Dispose();
     }
 

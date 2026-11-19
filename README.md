@@ -224,6 +224,42 @@ The callback cannot inspect request headers, WebUI serializes HTTP handling
 behind a process-wide mutex, and async-response mode is also process-wide. This
 is a contiguous-buffer API, not streaming.
 
+## Guarding the window's close
+
+`WebUiWindow.SetCloseHandler` lets an application keep an embedded WebView
+window open when the user closes it, for example to ask about unsaved work.
+The handler returns `true` to let the window close and `false` to keep it
+open. It runs on the window's user-interface thread, so return quickly: to
+ask asynchronously, return `false`, ask, and call `Close()` once the close
+is approved.
+
+```csharp
+window.SetCloseHandler(() =>
+{
+    if (!document.HasUnsavedChanges)
+    {
+        return true;
+    }
+
+    _ = AskThenCloseAsync(window); // calls window.Close() when the user agrees
+    return false;
+});
+```
+
+| Window | Can keep the window open |
+| --- | --- |
+| Windows, WebView2 | Yes (`WM_CLOSE`) |
+| Linux, WebKitGTK | Yes (GTK `delete-event`) |
+| macOS, WebKit | No: WebUI learns of the close only afterwards; the handler is not called |
+| Browser window | No: the browser closes its window without asking; the handler is not called |
+
+`WebUiWindow.IsCloseHandlerSupported` is `true` on Windows and Linux. Closes
+the application starts are never refused and do not call the handler:
+`Close()`, `Dispose()`, `WebUiApplication.Exit()` and `Clean()`. GTK reports
+WebUI's own close as a `delete-event` too, so CS-WebUI answers it until the
+window is shown again. A handler that throws is reported to
+`WebUiApplication.UnhandledCallbackException`, and the window closes.
+
 ## Packages
 
 | Package | Purpose |
