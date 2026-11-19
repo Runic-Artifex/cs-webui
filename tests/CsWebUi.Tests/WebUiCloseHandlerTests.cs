@@ -74,28 +74,4 @@ public sealed class WebUiCloseHandlerTests
         Assert.True(window.AllowsClose());
         Assert.Throws<ObjectDisposedException>(() => window.SetCloseHandler(() => true));
     }
-
-    [WebViewFact]
-    public async Task TheUsersCloseIsRefusedAndTheApplicationsCloseIsNot()
-    {
-        var asked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var calls = 0;
-        using var session = new WebViewSession(window => window.SetCloseHandler(() =>
-        {
-            Interlocked.Increment(ref calls);
-            asked.TrySetResult();
-            return false;
-        }));
-        await session.ShownAsync();
-
-        NativeWindowClose.RequestUserClose(session.Window);
-        await asked.Task.WaitAsync(TimeSpan.FromSeconds(10));
-        await Task.Delay(TimeSpan.FromSeconds(1));
-        Assert.True(session.Window.IsShown);
-        Assert.False(session.WaitEnded.IsCompleted);
-
-        session.Window.Close();
-        await session.WaitEnded.WaitAsync(TimeSpan.FromSeconds(15));
-        Assert.Equal(1, Volatile.Read(ref calls));
-    }
 }

@@ -29,20 +29,27 @@ internal sealed class WebViewFactAttribute : FactAttribute
     }
 }
 
-/// <summary>Shows one WebView window on a thread of its own that then runs WebUI's wait loop.</summary>
+/// <summary>Shows one WebView window on a thread of its own, which then runs WebUI's wait loop.</summary>
+/// <remarks>
+/// A test process opens one session only. WebKitGTK stays bound to the thread that first created
+/// a WebView, and with WebUI at 24c7d196 a second <c>webui_wait()</c> in a Linux WebView process
+/// did not return after its window closed, so tests that need a real window share one.
+/// </remarks>
 internal sealed class WebViewSession : IDisposable
 {
     internal const string Page = "<!doctype html><html><head><script src=\"/webui.js\"></script></head><body>CS-WebUI</body></html>";
 
-    private readonly Thread _thread;
+    private static int s_opened;
+
     private readonly TaskCompletionSource _shown = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _waitEnded = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     internal WebViewSession(Action<WebUiWindow>? configure = null)
     {
+        Assert.True(Interlocked.Exchange(ref s_opened, 1) == 0, "A test process opens one WebView session only.");
         Window = new WebUiWindow();
         configure?.Invoke(Window);
-        _thread = new Thread(() =>
+        new Thread(() =>
         {
             try
             {
@@ -62,8 +69,7 @@ internal sealed class WebViewSession : IDisposable
         {
             IsBackground = true,
             Name = "CS-WebUI WebView test",
-        };
-        _thread.Start();
+        }.Start();
     }
 
     internal WebUiWindow Window { get; }
@@ -74,10 +80,22 @@ internal sealed class WebViewSession : IDisposable
 
     public void Dispose()
     {
-        WebUiApplication.Exit();
-        _waitEnded.Task.Wait(TimeSpan.FromSeconds(30));
+        if (!_waitEnded.Task.IsCompleted && _shown.Task.IsCompletedSuccessfully)
+        {
+            Window.Close();
+        }
+
+        // Wait goes on while other tests' windows exist; then end it, and clean so they can go on.
+        if (!_waitEnded.Task.Wait(TimeSpan.FromSeconds(5)))
+        {
+            WebUiApplication.Exit();
+            _waitEnded.Task.Wait(TimeSpan.FromSeconds(15));
+            Window.Dispose();
+            WebUiApplication.Clean();
+            return;
+        }
+
         Window.Dispose();
-        WebUiApplication.Clean();
     }
 }
 

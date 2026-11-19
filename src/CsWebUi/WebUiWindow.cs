@@ -69,6 +69,10 @@ public sealed unsafe class WebUiWindow : IDisposable
     // closes the window, and that close must not be refused.
     private int _closeApproved;
 
+    // GTK reports no restored bounds while a window is maximized: the last ones seen, guarded by
+    // _lifecycleGate.
+    private WebUiWindowPlacement? _restoredPlacement;
+
     /// <summary>Creates a new WebUI window with an automatically allocated identifier.</summary>
     /// <exception cref="WebUiException">The native runtime could not allocate the window.</exception>
     public WebUiWindow()
@@ -894,6 +898,151 @@ public sealed unsafe class WebUiWindow : IDisposable
     {
         ThrowIfDisposed();
         WebUiNative.Maximize(_id);
+    }
+
+    /// <summary>Gets the native window behind this window, or zero.</summary>
+    /// <remarks>
+    /// <list type="table">
+    /// <listheader><term>Window</term><description>Handle</description></listheader>
+    /// <item><term>Windows, WebView2</term><description>The window's <c>HWND</c>.</description></item>
+    /// <item><term>Windows, browser</term><description>WebUI's guess at an <c>HWND</c> of the browser process it started; often zero or another window of that browser.</description></item>
+    /// <item><term>Linux, WebKitGTK</term><description>The window's <c>GtkWindow*</c>. GTK is not thread-safe: use it only on the thread that runs <see cref="WebUiApplication.Wait"/>.</description></item>
+    /// <item><term>Linux, browser; macOS</term><description>Zero. WebUI returns no handle there.</description></item>
+    /// </list>
+    /// <para>
+    /// The handle is valid only while the window is shown; WebUI destroys the native window when it
+    /// closes. Use <see cref="TryGetPlacement"/> and <see cref="TrySetPlacement"/> for the window's
+    /// bounds rather than the handle where they suffice.
+    /// </para>
+    /// </remarks>
+    public nint NativeHandle
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return (nint)WebUiNative.GetHwnd(_id);
+        }
+    }
+
+    /// <summary>Reads the restored bounds and the maximized state of the shown WebView window.</summary>
+    /// <remarks>
+    /// <para>
+    /// WebUI offers no getters and no change event, so CS-WebUI reads the native window directly.
+    /// Poll this method, or read it in a handler set with <see cref="SetCloseHandler"/>, to save the
+    /// placement when the window closes.
+    /// </para>
+    /// <list type="table">
+    /// <listheader><term>Window</term><description>Reported</description></listheader>
+    /// <item><term>Windows, WebView2</term><description>Restored bounds, also while maximized or minimized, and the maximized state.</description></item>
+    /// <item><term>Linux, WebKitGTK on X11</term><description>Size, position and maximized state. GTK reports no restored bounds while the window is maximized; CS-WebUI then returns the restored bounds it last read or set, or the maximized bounds if it has none.</description></item>
+    /// <item><term>Linux, WebKitGTK on Wayland</term><description>As on X11, without the position: <see cref="WebUiWindowPlacement.HasPosition"/> is <see langword="false"/>.</description></item>
+    /// <item><term>macOS; browser windows</term><description>Nothing: this returns <see langword="false"/>.</description></item>
+    /// </list>
+    /// <para>
+    /// On Linux the read runs on GTK's main loop and waits up to five seconds for it, so call it
+    /// while <see cref="WebUiApplication.Wait"/> runs, or from that thread.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// <see langword="false"/> when the window is not shown, is not a WebView window, or the
+    /// platform reports no placement.
+    /// </returns>
+    public bool TryGetPlacement(out WebUiWindowPlacement placement)
+    {
+        placement = default;
+        var handle = PlacementHandle();
+        if (handle == 0)
+        {
+            return false;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return WebUiWin32Placement.TryGet(handle, out placement);
+        }
+
+        if (!OperatingSystem.IsLinux() || !WebUiGtkPlacement.TryGet(handle, out placement))
+        {
+            return false;
+        }
+
+        lock (_lifecycleGate)
+        {
+            if (!placement.IsMaximized)
+            {
+                _restoredPlacement = placement;
+            }
+            else if (_restoredPlacement is { } restored)
+            {
+                placement = restored with { IsMaximized = true, HasPosition = placement.HasPosition };
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Moves and sizes the shown WebView window, and maximizes or restores it.</summary>
+    /// <remarks>
+    /// <para>
+    /// Unlike <see cref="SetPosition"/> and <see cref="SetSize"/>, which WebUI limits to positions
+    /// from 0 × 0 to 3000 × 1800 and sizes from 100 to 3840 pixels, this accepts any position,
+    /// including negative ones on a monitor left of or above the primary one. It does not keep the
+    /// window on a visible monitor; clamp a saved placement to the current monitors first.
+    /// </para>
+    /// <para>
+    /// The window must be shown: WebUI creates the native window only then. Before showing, use
+    /// <see cref="SetSize"/> and <see cref="SetPosition"/> where the values fit their limits, then
+    /// call this after the <c>Show</c> method returns. On Wayland the position is ignored; on Linux
+    /// the call waits for GTK's main loop like <see cref="TryGetPlacement"/>, and whether the window
+    /// manager honours the bounds and the maximized state is up to it.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// <see langword="false"/> when the window is not shown, is not a WebView window, or the
+    /// platform cannot place it, which includes macOS and browser windows.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">The width or height is not positive.</exception>
+    public bool TrySetPlacement(WebUiWindowPlacement placement)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(placement.Width, nameof(placement));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(placement.Height, nameof(placement));
+        var handle = PlacementHandle();
+        if (handle == 0)
+        {
+            return false;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return WebUiWin32Placement.TrySet(handle, placement);
+        }
+
+        if (!OperatingSystem.IsLinux() || !WebUiGtkPlacement.TrySet(handle, placement))
+        {
+            return false;
+        }
+
+        lock (_lifecycleGate)
+        {
+            _restoredPlacement = placement with { IsMaximized = false };
+        }
+
+        return true;
+    }
+
+    // The native window that the placement methods may use, or zero: a WebView2 window of this
+    // process on Windows (WebUI's browser-window guess belongs to another process), the GTK
+    // WebView window on Linux, and nothing on macOS.
+    private nint PlacementHandle()
+    {
+        ThrowIfDisposed();
+        if (_generation != WebUiNativeLifetime.Generation || (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+        {
+            return 0;
+        }
+
+        var handle = (nint)WebUiNative.GetHwnd(_id);
+        return OperatingSystem.IsWindows() && !WebUiWin32Placement.IsOwnWindow(handle) ? 0 : handle;
     }
 
     /// <summary>Sets the root directory from which this window serves files.</summary>
