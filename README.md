@@ -224,6 +224,86 @@ The callback cannot inspect request headers, WebUI serializes HTTP handling
 behind a process-wide mutex, and async-response mode is also process-wide. This
 is a contiguous-buffer API, not streaming.
 
+## Guarding the window's close
+
+`WebUiWindow.SetCloseHandler` lets an application keep an embedded WebView
+window open when the user closes it, for example to ask about unsaved work.
+The handler returns `true` to let the window close and `false` to keep it
+open. It runs on the window's user-interface thread, so return quickly: to
+ask asynchronously, return `false`, ask, and call `Close()` once the close
+is approved.
+
+```csharp
+window.SetCloseHandler(() =>
+{
+    if (!document.HasUnsavedChanges)
+    {
+        return true;
+    }
+
+    _ = AskThenCloseAsync(window); // calls window.Close() when the user agrees
+    return false;
+});
+```
+
+| Window | Can keep the window open |
+| --- | --- |
+| Windows, WebView2 | Yes (`WM_CLOSE`) |
+| Linux, WebKitGTK | Yes (GTK `delete-event`) |
+| macOS, WebKit | No: WebUI learns of the close only afterwards; the handler is not called |
+| Browser window | No: the browser closes its window without asking; the handler is not called |
+
+`WebUiWindow.IsCloseHandlerSupported` is `true` on Windows and Linux. Closes
+the application starts are never refused and do not call the handler:
+`Close()`, `Dispose()`, `WebUiApplication.Exit()` and `Clean()`. GTK reports
+WebUI's own close as a `delete-event` too, so CS-WebUI answers it until the
+window is shown again. A handler that throws is reported to
+`WebUiApplication.UnhandledCallbackException`, and the window closes.
+
+## Window placement
+
+WebUI can set a window's size and position but cannot report them, and its
+`webui_set_position` accepts only 0..3000 × 0..1800. To save a window's
+placement and restore it at the next start, CS-WebUI reads and sets the
+native window of an embedded WebView itself:
+
+```csharp
+// When the window closes, for example in the close handler:
+if (window.TryGetPlacement(out var placement))
+{
+    settings.Placement = placement; // X, Y, Width, Height, IsMaximized, HasPosition
+}
+
+// At the next start, after Show* returned:
+window.TrySetPlacement(ClampToVisibleMonitors(settings.Placement));
+```
+
+`TryGetPlacement` reports the restored (not maximized) bounds, so a window
+closed while maximized comes back maximized over the same restored size.
+Positions are signed: a monitor left of the primary one gives negative `X`.
+
+| Window | Read | Set |
+| --- | --- | --- |
+| Windows, WebView2 | Restored bounds and maximized state | Any bounds, maximized |
+| Linux, WebKitGTK on X11 | Size, position, maximized state | Size, position, maximized |
+| Linux, WebKitGTK on Wayland | Size and maximized state; `HasPosition` is `false` | Size and maximized; the position is ignored |
+| macOS, WebKit | No (`false`) | No (`false`) |
+| Browser window | No (`false`) | No (`false`) |
+
+- WebUI raises no event when the window moves or resizes; poll
+  `TryGetPlacement`, or read it when the window closes.
+- The window must be shown. Before `Show*`, use `SetSize` and `SetPosition`
+  where the values fit WebUI's limits, then call `TrySetPlacement` after it.
+- `TrySetPlacement` does not keep the window on a visible monitor; clamp a
+  saved placement first.
+- On Linux both calls run on GTK's main loop (the thread in
+  `WebUiApplication.Wait`) and wait up to five seconds for it. GTK reports no
+  restored bounds while a window is maximized, so CS-WebUI returns the
+  restored bounds it last read or set.
+- `NativeHandle` returns WebUI's `webui_get_hwnd`: the `HWND` on Windows, the
+  `GtkWindow*` of a Linux WebView (use it only on GTK's thread), and zero on
+  macOS and for Linux browser windows.
+
 ## Packages
 
 | Package | Purpose |

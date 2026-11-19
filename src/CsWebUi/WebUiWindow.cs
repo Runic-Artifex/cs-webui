@@ -54,6 +54,7 @@ public sealed unsafe class WebUiWindow : IDisposable
     private readonly nuint _id;
     private readonly int _generation;
     private FileHandlerRegistration? _fileHandler;
+    private Func<bool>? _closeHandler;
     private WebUiLoopbackGuard? _loopbackGuard;
     private int _callbacksInFlight;
     private int _customPort;
@@ -63,6 +64,14 @@ public sealed unsafe class WebUiWindow : IDisposable
     private int _disposeRequested;
     private int _shutdownCancelled;
     private int _destroyed;
+
+    // Set by Close until the window is shown again: GTK asks the close handler again when WebUI
+    // closes the window, and that close must not be refused.
+    private int _closeApproved;
+
+    // GTK reports no restored bounds while a window is maximized: the last ones seen, guarded by
+    // _lifecycleGate.
+    private WebUiWindowPlacement? _restoredPlacement;
 
     /// <summary>Creates a new WebUI window with an automatically allocated identifier.</summary>
     /// <exception cref="WebUiException">The native runtime could not allocate the window.</exception>
@@ -606,9 +615,11 @@ public sealed unsafe class WebUiWindow : IDisposable
     private bool MustSelectPort()
         => Volatile.Read(ref _customPort) == 0 && Volatile.Read(ref _serverRequested) == 0 && _startsInFlight == 0;
 
-    // Chooses the port, unless it is already chosen, and counts the start as in flight.
+    // Chooses the port, unless it is already chosen, and counts the start as in flight. Every Show
+    // and StartServer begins here, so a close approved before it no longer applies.
     private int BeginServerStart()
     {
+        Volatile.Write(ref _closeApproved, 0);
         lock (_portGate)
         {
             var selectedPort = MustSelectPort() ? SelectFreePort() : 0;
@@ -801,10 +812,71 @@ public sealed unsafe class WebUiWindow : IDisposable
     }
 
     /// <summary>Closes the visible window but retains its native object and bindings.</summary>
+    /// <remarks>
+    /// A handler set with <see cref="SetCloseHandler"/> cannot refuse this close: until the window
+    /// is shown again, CS-WebUI allows every close without calling the handler.
+    /// </remarks>
     public void Close()
     {
         ThrowIfDisposed();
+        Volatile.Write(ref _closeApproved, 1);
         WebUiNative.Close(_id);
+    }
+
+    /// <summary>
+    /// Gets whether WebUI on this operating system asks a handler set with
+    /// <see cref="SetCloseHandler"/> before an embedded WebView window closes.
+    /// </summary>
+    /// <value>
+    /// <see langword="true"/> on Windows (WebView2) and Linux (WebKitGTK); <see langword="false"/>
+    /// on macOS, where WebUI learns of the close only after the window has closed.
+    /// </value>
+    public static bool IsCloseHandlerSupported => OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
+
+    /// <summary>
+    /// Sets a handler that decides whether the user may close this window's embedded WebView, or
+    /// removes it.
+    /// </summary>
+    /// <param name="handler">
+    /// Returns <see langword="true"/> to let the window close, or <see langword="false"/> to keep it
+    /// open. <see langword="null"/> removes the handler, and the window closes without asking.
+    /// </param>
+    /// <remarks>
+    /// <para>
+    /// WebUI calls the handler when the user closes the window, for example with its close button
+    /// or the system's close shortcut, in these cases only:
+    /// </para>
+    /// <list type="table">
+    /// <listheader><term>Window</term><description>Handler</description></listheader>
+    /// <item><term>Windows, WebView2</term><description>Called on <c>WM_CLOSE</c>; <see langword="false"/> keeps the window open.</description></item>
+    /// <item><term>Linux, WebKitGTK</term><description>Called on GTK's <c>delete-event</c>; <see langword="false"/> keeps the window open.</description></item>
+    /// <item><term>macOS, WebKit</term><description>Never called. WebUI learns of the close only after the window has closed.</description></item>
+    /// <item><term>Browser window, any system</term><description>Never called. The browser closes its window without asking WebUI.</description></item>
+    /// </list>
+    /// <para>
+    /// <see cref="IsCloseHandlerSupported"/> tells whether the operating system is one that asks.
+    /// The handler runs on the window's user-interface thread: on Windows the WebView's own thread,
+    /// on Linux the thread that runs <see cref="WebUiApplication.Wait"/>. The window does not respond
+    /// while it runs, so return quickly. To ask the user asynchronously, return
+    /// <see langword="false"/>, ask, and call <see cref="Close"/> once the close is approved.
+    /// </para>
+    /// <para>
+    /// Closes the application starts are never refused, and the handler is not called for them:
+    /// <see cref="Close"/>, <see cref="Dispose"/>, <see cref="WebUiApplication.Exit"/> and
+    /// <see cref="WebUiApplication.Clean"/>. GTK reports WebUI's own close as a
+    /// <c>delete-event</c> too, so CS-WebUI answers it for the handler. If the handler throws, the
+    /// exception is reported to <see cref="WebUiApplication.UnhandledCallbackException"/> and the
+    /// window closes.
+    /// </para>
+    /// </remarks>
+    public void SetCloseHandler(Func<bool>? handler)
+    {
+        lock (_lifecycleGate)
+        {
+            ThrowIfDisposed();
+            Volatile.Write(ref _closeHandler, handler);
+            WebUiNative.SetCloseHandlerWebView(_id, handler is null ? null : &CloseHandlerTrampoline);
+        }
     }
 
     /// <summary>Brings the window to the foreground.</summary>
@@ -826,6 +898,151 @@ public sealed unsafe class WebUiWindow : IDisposable
     {
         ThrowIfDisposed();
         WebUiNative.Maximize(_id);
+    }
+
+    /// <summary>Gets the native window behind this window, or zero.</summary>
+    /// <remarks>
+    /// <list type="table">
+    /// <listheader><term>Window</term><description>Handle</description></listheader>
+    /// <item><term>Windows, WebView2</term><description>The window's <c>HWND</c>.</description></item>
+    /// <item><term>Windows, browser</term><description>WebUI's guess at an <c>HWND</c> of the browser process it started; often zero or another window of that browser.</description></item>
+    /// <item><term>Linux, WebKitGTK</term><description>The window's <c>GtkWindow*</c>. GTK is not thread-safe: use it only on the thread that runs <see cref="WebUiApplication.Wait"/>.</description></item>
+    /// <item><term>Linux, browser; macOS</term><description>Zero. WebUI returns no handle there.</description></item>
+    /// </list>
+    /// <para>
+    /// The handle is valid only while the window is shown; WebUI destroys the native window when it
+    /// closes. Use <see cref="TryGetPlacement"/> and <see cref="TrySetPlacement"/> for the window's
+    /// bounds rather than the handle where they suffice.
+    /// </para>
+    /// </remarks>
+    public nint NativeHandle
+    {
+        get
+        {
+            ThrowIfDisposed();
+            return (nint)WebUiNative.GetHwnd(_id);
+        }
+    }
+
+    /// <summary>Reads the restored bounds and the maximized state of the shown WebView window.</summary>
+    /// <remarks>
+    /// <para>
+    /// WebUI offers no getters and no change event, so CS-WebUI reads the native window directly.
+    /// Poll this method, or read it in a handler set with <see cref="SetCloseHandler"/>, to save the
+    /// placement when the window closes.
+    /// </para>
+    /// <list type="table">
+    /// <listheader><term>Window</term><description>Reported</description></listheader>
+    /// <item><term>Windows, WebView2</term><description>Restored bounds, also while maximized or minimized, and the maximized state.</description></item>
+    /// <item><term>Linux, WebKitGTK on X11</term><description>Size, position and maximized state. GTK reports no restored bounds while the window is maximized; CS-WebUI then returns the restored bounds it last read or set, or the maximized bounds if it has none.</description></item>
+    /// <item><term>Linux, WebKitGTK on Wayland</term><description>As on X11, without the position: <see cref="WebUiWindowPlacement.HasPosition"/> is <see langword="false"/>.</description></item>
+    /// <item><term>macOS; browser windows</term><description>Nothing: this returns <see langword="false"/>.</description></item>
+    /// </list>
+    /// <para>
+    /// On Linux the read runs on GTK's main loop and waits up to five seconds for it, so call it
+    /// while <see cref="WebUiApplication.Wait"/> runs, or from that thread.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// <see langword="false"/> when the window is not shown, is not a WebView window, or the
+    /// platform reports no placement.
+    /// </returns>
+    public bool TryGetPlacement(out WebUiWindowPlacement placement)
+    {
+        placement = default;
+        var handle = PlacementHandle();
+        if (handle == 0)
+        {
+            return false;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return WebUiWin32Placement.TryGet(handle, out placement);
+        }
+
+        if (!OperatingSystem.IsLinux() || !WebUiGtkPlacement.TryGet(handle, out placement))
+        {
+            return false;
+        }
+
+        lock (_lifecycleGate)
+        {
+            if (!placement.IsMaximized)
+            {
+                _restoredPlacement = placement;
+            }
+            else if (_restoredPlacement is { } restored)
+            {
+                placement = restored with { IsMaximized = true, HasPosition = placement.HasPosition };
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Moves and sizes the shown WebView window, and maximizes or restores it.</summary>
+    /// <remarks>
+    /// <para>
+    /// Unlike <see cref="SetPosition"/> and <see cref="SetSize"/>, which WebUI limits to positions
+    /// from 0 × 0 to 3000 × 1800 and sizes from 100 to 3840 pixels, this accepts any position,
+    /// including negative ones on a monitor left of or above the primary one. It does not keep the
+    /// window on a visible monitor; clamp a saved placement to the current monitors first.
+    /// </para>
+    /// <para>
+    /// The window must be shown: WebUI creates the native window only then. Before showing, use
+    /// <see cref="SetSize"/> and <see cref="SetPosition"/> where the values fit their limits, then
+    /// call this after the <c>Show</c> method returns. On Wayland the position is ignored; on Linux
+    /// the call waits for GTK's main loop like <see cref="TryGetPlacement"/>, and whether the window
+    /// manager honours the bounds and the maximized state is up to it.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// <see langword="false"/> when the window is not shown, is not a WebView window, or the
+    /// platform cannot place it, which includes macOS and browser windows.
+    /// </returns>
+    /// <exception cref="ArgumentOutOfRangeException">The width or height is not positive.</exception>
+    public bool TrySetPlacement(WebUiWindowPlacement placement)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(placement.Width, nameof(placement));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(placement.Height, nameof(placement));
+        var handle = PlacementHandle();
+        if (handle == 0)
+        {
+            return false;
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            return WebUiWin32Placement.TrySet(handle, placement);
+        }
+
+        if (!OperatingSystem.IsLinux() || !WebUiGtkPlacement.TrySet(handle, placement))
+        {
+            return false;
+        }
+
+        lock (_lifecycleGate)
+        {
+            _restoredPlacement = placement with { IsMaximized = false };
+        }
+
+        return true;
+    }
+
+    // The native window that the placement methods may use, or zero: a WebView2 window of this
+    // process on Windows (WebUI's browser-window guess belongs to another process), the GTK
+    // WebView window on Linux, and nothing on macOS.
+    private nint PlacementHandle()
+    {
+        ThrowIfDisposed();
+        if (_generation != WebUiNativeLifetime.Generation || (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()))
+        {
+            return 0;
+        }
+
+        var handle = (nint)WebUiNative.GetHwnd(_id);
+        return OperatingSystem.IsWindows() && !WebUiWin32Placement.IsOwnWindow(handle) ? 0 : handle;
     }
 
     /// <summary>Sets the root directory from which this window serves files.</summary>
@@ -1348,6 +1565,51 @@ public sealed unsafe class WebUiWindow : IDisposable
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static byte CloseHandlerTrampoline(nuint windowId)
+    {
+        try
+        {
+            return Windows.TryGetValue((WebUiNativeLifetime.Generation, windowId), out var window)
+                && !window.AllowsClose()
+                ? (byte)0
+                : (byte)1;
+        }
+        catch
+        {
+            // No managed exception may cross the native callback boundary.
+            return 1;
+        }
+    }
+
+    // Whether the window may close now; false keeps it open.
+    internal bool AllowsClose()
+    {
+        if (Volatile.Read(ref _closeApproved) != 0 || WebUiNativeLifetime.IsExiting || !TryBeginCallback())
+        {
+            return true;
+        }
+
+        t_dispatchDepth++;
+        WebUiNativeLifetime.EnterDispatch();
+        try
+        {
+            var handler = Volatile.Read(ref _closeHandler);
+            return handler is null || handler();
+        }
+        catch (Exception exception)
+        {
+            WebUiApplication.ReportUnhandledCallbackException(exception, this, null);
+            return true;
+        }
+        finally
+        {
+            WebUiNativeLifetime.LeaveDispatch();
+            t_dispatchDepth--;
+            EndCallback();
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
     private static void* FileHandlerTrampoline(nuint windowId, byte* path, int* length)
     {
         if (length is null)
@@ -1626,6 +1888,7 @@ public sealed unsafe class WebUiWindow : IDisposable
         }
 
         Volatile.Write(ref _fileHandler, null);
+        Volatile.Write(ref _closeHandler, null);
         _shutdown.Dispose();
     }
 
