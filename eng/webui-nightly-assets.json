@@ -1,37 +1,37 @@
 {
   "repository": "webui-dev/webui",
   "tag": "nightly",
-  "commit": "24c7d196edc63f5b777d465063c3d26731f52dea",
+  "commit": "8a55352c2d7b6c0be9a149af417373714a390cb8",
   "version": "2.5.0-beta.4",
   "assets": [
     {
       "rid": "linux-x64",
       "name": "webui-linux-gcc-x64.zip",
-      "sha256": "6f43619a9d1265da26b0bb7890966522f5ca74471d7fb79b1de8def6822aa352",
+      "sha256": "1a9f02d56fcd2c438fb8e7febfb1dbac50a5cbb6dc6c1c54229efc04def7cb95",
       "library": "libwebui-2.so"
     },
     {
       "rid": "linux-arm64",
       "name": "webui-linux-gcc-arm64.zip",
-      "sha256": "6eb23793f9ef2c1d8d09e1532ab3b488b51a8ba4716a3b5b0e4340806670d5f5",
+      "sha256": "c516ca7d4ead319f4713e522611688fd389f23f25bc7be34fe215b7c85742726",
       "library": "libwebui-2.so"
     },
     {
       "rid": "osx-x64",
       "name": "webui-macos-clang-x64.zip",
-      "sha256": "98a342cf654cb5d523f9cd6832a6912a2c615fa4b463e05787ccb2b27ad6af67",
+      "sha256": "3adfbccd9da05a9ae4c57a542ac017121aab4ac4e4f30f73378df57ff177536c",
       "library": "libwebui-2.dylib"
     },
     {
       "rid": "osx-arm64",
       "name": "webui-macos-clang-arm64.zip",
-      "sha256": "08c36043e6ece8d32c7d0e4f2a2fe4866ec1da9e8849294c8ed9b5321c5ccae2",
+      "sha256": "147fa85bd22d3c983650e272b2019258a9e890b1cbde3ce915051c868a72766b",
       "library": "libwebui-2.dylib"
     },
     {
       "rid": "win-x64",
       "name": "webui-windows-msvc-x64.zip",
-      "sha256": "9bbc1d62195b55af10c84ed6c2d79b9ab4dfbe3f4e25b256629bc87a686f9ad5",
+      "sha256": "23434cc1a3ce54c33d9f3ebb152797ef2f5149bb257cbf0c2d5d183e9b8b1d57",
       "library": "webui-2.dll",
       "staticLibrary": "webui-2-static.lib"
     }
